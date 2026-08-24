@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="robots" content="noindex, nofollow, noarchive" />
+<title>conversa</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23e2896a' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v8A2.5 2.5 0 0 1 17.5 16H10l-4.5 4v-4H6.5A2.5 2.5 0 0 1 4 13.5v-8Z'/%3E%3C/svg%3E" />
+<link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+<div id="login-screen" class="screen">
+  <div class="login-card">
+    <div class="login-icon">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="10" rx="2.5"/><path d="M8 11V7.5a4 4 0 0 1 8 0V11"/><circle cx="12" cy="15.5" r="1.4" fill="currentColor" stroke="none"/></svg>
+    </div>
+    <p class="login-hint">Digite o código de acesso</p>
+    <form id="login-form">
+      <input id="code-input" type="password" inputmode="text" autocomplete="off" placeholder="código" />
+      <button type="submit">Entrar</button>
+    </form>
+    <p id="login-error" class="error"></p>
+  </div>
+</div>
+
+<div id="chat-screen" class="screen hidden">
+  <header class="chat-header">
+    <span class="dot"></span>
+    <span class="title">conversa</span>
+    <div class="header-actions">
+      <button id="export-btn" class="icon-btn" title="Exportar backup">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 4v11"/><path d="M7 11l5 5 5-5"/><path d="M5 19.5h14"/></svg>
+      </button>
+      <button id="clear-btn" class="icon-btn" title="Limpar conversa">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M5 7h14"/><path d="M9 7V5.5a1.5 1.5 0 0 1 1.5-1.5h3A1.5 1.5 0 0 1 15 5.5V7"/><path d="M7 7l.8 12.1a2 2 0 0 0 2 1.9h4.4a2 2 0 0 0 2-1.9L17 7"/><path d="M10.5 11v6"/><path d="M13.5 11v6"/></svg>
+      </button>
+      <button id="logout-btn" class="icon-btn" title="Sair">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M13 4.5H7a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h6"/><path d="M10.5 12H21"/><path d="M17.5 8.5 21 12l-3.5 3.5"/></svg>
+      </button>
+    </div>
+  </header>
+
+  <div id="messages" class="messages">
+    <div id="loading-state" class="center-state hidden">
+      <span class="spin-dot"></span>
+      <span>carregando</span>
+    </div>
+    <div id="empty-state" class="center-state hidden">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v8A2.5 2.5 0 0 1 17.5 16H10l-4.5 4v-4H6.5A2.5 2.5 0 0 1 4 13.5v-8Z"/></svg>
+      <p>Nenhuma mensagem ainda.<br>Escreva algo pra começar a conversa.</p>
+    </div>
+  </div>
+
+  <div id="reply-bar" class="reply-bar hidden">
+    <div class="reply-bar-stripe"></div>
+    <div class="reply-bar-body">
+      <div id="reply-bar-sender" class="reply-bar-sender"></div>
+      <div id="reply-bar-snippet" class="reply-bar-snippet"></div>
+    </div>
+    <button type="button" id="reply-bar-cancel" class="reply-bar-cancel" title="Cancelar resposta">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6 6 18"/></svg>
+    </button>
+  </div>
+
+  <form id="composer" class="composer">
+    <input id="name-input" class="name-input" type="text" placeholder="seu nome" maxlength="60" />
+    <input id="file-input" type="file" hidden />
+    <button type="button" id="attach-btn" class="icon-btn" title="Anexar foto/vídeo">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 8.5 9.9 16a3 3 0 1 1-4.2-4.2l8.5-8.5a2 2 0 1 1 2.8 2.8L8.7 14.4a1 1 0 1 1-1.4-1.4l6.6-6.6"/></svg>
+    </button>
+    <input id="text-input" class="text-input" type="text" placeholder="escreva uma mensagem..." autocomplete="off" />
+    <button type="submit" class="send-btn" title="Enviar">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 12 19 5l-5 14-2.8-6.2L4.5 12Z"/></svg>
+    </button>
+  </form>
+  <div id="upload-progress" class="upload-progress hidden"></div>
+</div>
+
+<div id="toast" class="toast hidden"></div>
+
+<div id="lightbox" class="lightbox hidden">
+  <button id="lightbox-close" class="lightbox-close" title="Fechar">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6 6 18"/></svg>
+  </button>
+  <div id="lightbox-content"></div>
+</div>
+
+<div id="confirm-overlay" class="confirm-overlay hidden">
+  <div class="confirm-card">
+    <p id="confirm-text" class="confirm-text"></p>
+    <div class="confirm-actions">
+      <button id="confirm-cancel" class="confirm-btn confirm-cancel">Cancelar</button>
+      <button id="confirm-ok" class="confirm-btn confirm-danger">Continuar</button>
+    </div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>
