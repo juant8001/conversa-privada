@@ -33,6 +33,7 @@
   const replyBarSender = document.getElementById('reply-bar-sender');
   const replyBarSnippet = document.getElementById('reply-bar-snippet');
   const replyBarCancel = document.getElementById('reply-bar-cancel');
+  const scrollBottomBtn = document.getElementById('scroll-bottom-btn');
 
   // Deterministic per-name color so the same sender always reads as the
   // same color across the whole conversation (avatar, name label, quotes).
@@ -128,6 +129,7 @@
     lastSender = null;
     clearReplyingTo();
     updateEmptyState();
+    updateScrollBtn();
   }
 
   const NAME_KEY = 'private-chat:my-name';
@@ -388,7 +390,26 @@
       el.addEventListener(evt, scrollToBottom, { once: true });
       el.addEventListener('error', scrollToBottom, { once: true });
     });
+    // The media-load listeners above fire later (once images decode), so
+    // give the floating button a beat to re-check before settling.
+    setTimeout(updateScrollBtn, 400);
   }
+
+  function isNearBottom() {
+    return messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 80;
+  }
+
+  // Floating "go to last messages" button: a manual fallback for whenever
+  // the automatic scroll doesn't land exactly at the bottom (slow network,
+  // a browser that fires load events late, etc.) or for whenever someone
+  // has scrolled up to read older messages on purpose.
+  function updateScrollBtn() {
+    scrollBottomBtn.classList.toggle('hidden', isNearBottom());
+  }
+  messagesEl.addEventListener('scroll', updateScrollBtn);
+  scrollBottomBtn.addEventListener('click', () => {
+    messagesEl.scrollTo({ top: messagesEl.scrollHeight, behavior: 'smooth' });
+  });
 
   async function loadMessages() {
     loadingState.classList.remove('hidden');
@@ -400,6 +421,7 @@
       resetMessagesView();
       messages.forEach(renderMessage);
       scrollToBottomWhenReady();
+      updateScrollBtn();
     } finally {
       loadingState.classList.add('hidden');
       updateEmptyState();
@@ -410,9 +432,18 @@
     if (es) es.close();
     es = new EventSource(api('/api/stream'));
     es.addEventListener('message', (evt) => {
+      // Only auto-follow to the new message if the person was already at
+      // (or very near) the bottom — otherwise this would yank them away
+      // from older messages they're in the middle of reading. They still
+      // get the floating button to jump down whenever they want.
+      const wasNearBottom = isNearBottom();
       const m = JSON.parse(evt.data);
       renderMessage(m);
-      scrollToBottomWhenReady();
+      if (wasNearBottom) {
+        scrollToBottomWhenReady();
+      } else {
+        updateScrollBtn();
+      }
     });
     es.addEventListener('cleared', () => {
       resetMessagesView();

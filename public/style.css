@@ -64,7 +64,8 @@ body::before {
 * { scrollbar-color: var(--border) transparent; scrollbar-width: thin; }
 
 .screen {
-  min-height: 100vh;
+  height: 100vh;
+  height: 100dvh;
   display: flex;
   flex-direction: column;
 }
@@ -507,6 +508,20 @@ body::before {
   font-size: 12px;
   color: var(--muted);
   padding-bottom: 8px;
+}
+
+/* ---- scroll-to-bottom floating button ---- */
+/* Fallback for whenever the auto-scroll doesn't land on the very last
+   message (still loading, a slow connection, or a browser quirk): lets
+   the person jump to the latest messages with one tap. Sits above the
+   composer, only shown once the conversation is scrolled away from the
+   bottom (toggled in app.js). */
+.scroll-bottom-btn {
+  position: absolute;
+  right: 18px;
+  bottom: 88px;
+  z-index: 6;
+  box-shadow: var(--shadow-2);
 }
 
 /* ---- empty / loading states ---- */
