@@ -24,11 +24,14 @@
 html, body {
   height: 100%;
   margin: 0;
+  /* Same background on <html> as on <body>: covers any sliver that shows
+     past the app's own box (overscroll bounce, viewport-unit rounding,
+     the mobile keyboard animating) so it never flashes white. */
+  background: linear-gradient(160deg, var(--bg-1), var(--bg-2));
 }
 
 body {
   font-family: -apple-system, "SF Pro Text", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
-  background: linear-gradient(160deg, var(--bg-1), var(--bg-2));
   color: var(--ink);
   min-height: 100dvh;
   position: relative;
@@ -201,6 +204,7 @@ body::before {
 
 .messages {
   flex: 1;
+  min-height: 0; /* let it actually shrink to fit the viewport on Safari */
   overflow-y: auto;
   padding: 18px 14px 10px;
   display: flex;
