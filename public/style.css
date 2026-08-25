@@ -17,6 +17,16 @@
   --shadow-1: 0 1px 3px rgba(8, 6, 10, 0.35);
   --shadow-2: 0 20px 60px rgba(6, 5, 9, 0.5);
   --ring: 0 0 0 3px rgba(226, 137, 106, 0.28);
+  /* Real, pixel-accurate viewport height, kept in sync by app.js via the
+     Visual Viewport API. Falls back to 100dvh (set below, before JS runs)
+     - vh/dvh alone are not reliable once the on-screen keyboard opens: on
+     iOS in particular the layout viewport doesn't reliably shrink with the
+     keyboard, so a box sized with vh/dvh can end up TALLER than what's
+     actually visible above the keyboard, and the sliver that's pushed
+     off-screen reads as a white gap (it's not a wrong color - nothing of
+     ours is painted there at all). --app-height tracks the real visible
+     height instead. */
+  --app-height: 100dvh;
 }
 
 * { box-sizing: border-box; }
@@ -24,6 +34,12 @@
 html, body {
   height: 100%;
   margin: 0;
+  /* Never let the document itself scroll/bounce - all scrolling happens
+     inside #messages. This closes off the other way a white sliver could
+     show: the page briefly rubber-banding or auto-scrolling itself (e.g.
+     the browser trying to keep a focused input in view when the keyboard
+     opens) past the edge of our own dark background. */
+  overflow: hidden;
   /* Same background on <html> as on <body>: covers any sliver that shows
      past the app's own box (overscroll bounce, viewport-unit rounding,
      the mobile keyboard animating) so it never flashes white. */
@@ -69,6 +85,7 @@ body::before {
 .screen {
   height: 100vh;
   height: 100dvh;
+  height: var(--app-height); /* kept live-accurate by app.js, see above */
   display: flex;
   flex-direction: column;
 }

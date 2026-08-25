@@ -1,6 +1,27 @@
 (() => {
   'use strict';
 
+  // Keep --app-height (used by .screen instead of a plain vh/dvh unit) in
+  // sync with the REAL visible viewport via the Visual Viewport API.
+  // vh/dvh alone are not reliable once the on-screen keyboard opens - on
+  // iOS especially, the layout viewport those units are based on doesn't
+  // reliably shrink with the keyboard, so a box sized purely with CSS
+  // units can stay taller than what's actually visible above the
+  // keyboard, and the part that gets pushed off-screen reads as a white
+  // gap. window.visualViewport tracks the actual visible area instead,
+  // keyboard included, in every browser that supports it (Safari 13+,
+  // Chrome 61+); older browsers just keep the 100dvh CSS fallback.
+  function setAppHeight() {
+    const h = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+    document.documentElement.style.setProperty('--app-height', `${h}px`);
+  }
+  setAppHeight();
+  if (window.visualViewport) {
+    window.visualViewport.addEventListener('resize', setAppHeight);
+  } else {
+    window.addEventListener('resize', setAppHeight);
+  }
+
   const roomPath = location.pathname.replace(/\/$/, ''); // e.g. /c/<slug>
   const api = (p) => `${roomPath}${p}`;
 
