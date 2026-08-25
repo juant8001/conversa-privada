@@ -204,15 +204,22 @@ body::before {
   padding: 18px 14px 10px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
   max-width: 720px;
   width: 100%;
   margin: 0 auto;
 }
 
-.msg-row { display: flex; flex-direction: column; max-width: 78%; }
+.msg-row { display: flex; flex-direction: column; max-width: 78%; margin-top: 14px; }
+.msg-row:first-child { margin-top: 0; }
+/* Consecutive messages from the same author sit close together, WhatsApp/
+   Telegram-style, instead of getting the full inter-group gap. */
+.msg-row.grouped { margin-top: 3px; }
 .msg-row.me { align-self: flex-end; align-items: flex-end; }
 .msg-row.them { align-self: flex-start; align-items: flex-start; }
+
+/* Placeholder that keeps grouped "them" messages indented to line up with
+   the avatar shown on the first message of the group. */
+.avatar-spacer { width: 26px; flex-shrink: 0; }
 
 .msg-line {
   display: flex;

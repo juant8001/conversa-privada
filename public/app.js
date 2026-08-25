@@ -124,6 +124,8 @@
     messagesEl.querySelectorAll('.msg-row').forEach((el) => el.remove());
     renderedIds = new Set();
     authorSide = new Map();
+    lastRow = null;
+    lastSender = null;
     clearReplyingTo();
     updateEmptyState();
   }
@@ -136,6 +138,13 @@
 
   let renderedIds = new Set();
   let es = null;
+
+  // Tracks the previously-rendered row/sender so consecutive messages from
+  // the same author can be visually grouped (tighter spacing, avatar/name
+  // shown once, timestamp only on the last one of the run) instead of each
+  // rendering as a fully separate message like before.
+  let lastRow = null;
+  let lastSender = null;
 
   // Which side of the screen each author's bubbles render on. Deterministic
   // and shared by every viewer (unlike comparing against "my name" typed
@@ -225,30 +234,43 @@
 
     const color = nameColor(m.sender);
     const mine = sideForSender(m.sender) === 'me';
+    // Same author as the message right before this one → render as part of
+    // the same visual group instead of a brand-new block.
+    const grouped = lastSender === m.sender;
 
     const row = document.createElement('div');
-    row.className = `msg-row ${mine ? 'me' : 'them'}`;
+    row.className = `msg-row ${mine ? 'me' : 'them'}${grouped ? ' grouped' : ''}`;
     row.dataset.id = m.id;
 
     const line = document.createElement('div');
     line.className = 'msg-line';
 
     if (!mine) {
-      const avatar = document.createElement('div');
-      avatar.className = 'avatar';
-      avatar.style.background = color;
-      avatar.textContent = (m.sender || '?').trim().charAt(0).toUpperCase();
-      line.appendChild(avatar);
+      if (grouped) {
+        // Keep the same left indentation as the group's first message
+        // without repeating the avatar on every bubble.
+        const spacer = document.createElement('div');
+        spacer.className = 'avatar-spacer';
+        line.appendChild(spacer);
+      } else {
+        const avatar = document.createElement('div');
+        avatar.className = 'avatar';
+        avatar.style.background = color;
+        avatar.textContent = (m.sender || '?').trim().charAt(0).toUpperCase();
+        line.appendChild(avatar);
+      }
     }
 
     const body = document.createElement('div');
     body.className = 'msg-body';
 
-    const senderEl = document.createElement('div');
-    senderEl.className = 'msg-sender';
-    senderEl.textContent = m.sender;
-    senderEl.style.color = color;
-    body.appendChild(senderEl);
+    if (!grouped) {
+      const senderEl = document.createElement('div');
+      senderEl.className = 'msg-sender';
+      senderEl.textContent = m.sender;
+      senderEl.style.color = color;
+      body.appendChild(senderEl);
+    }
 
     const bubble = document.createElement('div');
     bubble.className = 'bubble';
@@ -306,7 +328,15 @@
     line.appendChild(body);
     row.appendChild(line);
 
+    if (grouped && lastRow) {
+      // Only the last message of a group keeps its visible timestamp.
+      const prevTime = lastRow.querySelector('.msg-time');
+      if (prevTime) prevTime.classList.add('hidden');
+    }
+
     messagesEl.appendChild(row);
+    lastRow = row;
+    lastSender = m.sender;
     updateEmptyState();
   }
 
