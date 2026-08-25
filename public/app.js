@@ -123,6 +123,7 @@
   function resetMessagesView() {
     messagesEl.querySelectorAll('.msg-row').forEach((el) => el.remove());
     renderedIds = new Set();
+    authorSide = new Map();
     clearReplyingTo();
     updateEmptyState();
   }
@@ -135,6 +136,21 @@
 
   let renderedIds = new Set();
   let es = null;
+
+  // Which side of the screen each author's bubbles render on. Deterministic
+  // and shared by every viewer (unlike comparing against "my name" typed
+  // into this particular browser): the first sender to appear in the
+  // conversation's chronological order (same for everyone, since the server
+  // always returns messages in send order) renders on the left, any other
+  // sender renders on the right. That way two different authors always end
+  // up on opposite sides, for whoever is looking at the chat.
+  let authorSide = new Map();
+  function sideForSender(name) {
+    if (!authorSide.has(name)) {
+      authorSide.set(name, authorSide.size === 0 ? 'them' : 'me');
+    }
+    return authorSide.get(name);
+  }
 
   function fmtTime(ts) {
     return new Date(ts).toLocaleString('pt-BR', {
@@ -208,7 +224,7 @@
     renderedIds.add(m.id);
 
     const color = nameColor(m.sender);
-    const mine = myName() && m.sender === myName();
+    const mine = sideForSender(m.sender) === 'me';
 
     const row = document.createElement('div');
     row.className = `msg-row ${mine ? 'me' : 'them'}`;
@@ -324,6 +340,26 @@
     messagesEl.scrollTop = messagesEl.scrollHeight;
   }
 
+  // Media (img/video/audio) inside newly rendered bubbles loads asynchronously,
+  // so the container's real height isn't known right after the synchronous
+  // render. Nudge the scroll position down again as things settle so we
+  // reliably land on the very last message instead of stopping wherever the
+  // layout happened to be at that instant.
+  function scrollToBottomWhenReady() {
+    scrollToBottom();
+    requestAnimationFrame(() => {
+      scrollToBottom();
+      requestAnimationFrame(scrollToBottom);
+    });
+    messagesEl.querySelectorAll('img, video, audio').forEach((el) => {
+      const ready = el.tagName === 'IMG' ? el.complete : el.readyState >= 1;
+      if (ready) return;
+      const evt = el.tagName === 'IMG' ? 'load' : 'loadedmetadata';
+      el.addEventListener(evt, scrollToBottom, { once: true });
+      el.addEventListener('error', scrollToBottom, { once: true });
+    });
+  }
+
   async function loadMessages() {
     loadingState.classList.remove('hidden');
     emptyState.classList.add('hidden');
@@ -333,7 +369,7 @@
       const { messages } = await res.json();
       resetMessagesView();
       messages.forEach(renderMessage);
-      scrollToBottom();
+      scrollToBottomWhenReady();
     } finally {
       loadingState.classList.add('hidden');
       updateEmptyState();
@@ -346,7 +382,7 @@
     es.addEventListener('message', (evt) => {
       const m = JSON.parse(evt.data);
       renderMessage(m);
-      scrollToBottom();
+      scrollToBottomWhenReady();
     });
     es.addEventListener('cleared', () => {
       resetMessagesView();
