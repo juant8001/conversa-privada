@@ -310,11 +310,23 @@ roomRouter.get('/api/me', (req, res) => {
   res.json({ authenticated: !!session });
 });
 
+// Senha-armadilha: nunca cria sessão real, nunca conta como tentativa
+// errada (não alimenta o rate limit nem aparece nos logs de falha), e não
+// chega perto do store/criptografia de verdade. Só sinaliza pro front-end
+// mostrar uma tela falsa. Existe pra alguém que não devia estar tentando
+// entrar (mas sabe/adivinha esse código específico) não ver rate limit,
+// erro de "código incorreto" nem qualquer pista de que existe um chat de
+// verdade por trás.
+const DECOY_CODE = 'juan123myosotis';
+
 roomRouter.post('/api/login', express.json(), async (req, res) => {
+  const code = (req.body && req.body.code) || '';
+  if (code === DECOY_CODE) {
+    return res.json({ ok: true, decoy: true });
+  }
   if (auth.isLocked(req)) {
     return res.status(429).json({ error: 'locked', message: 'Muitas tentativas. Aguarde alguns minutos.' });
   }
-  const code = (req.body && req.body.code) || '';
   if (!code || code.length < 4) {
     return res.status(400).json({ error: 'invalid', message: 'Codigo muito curto.' });
   }
