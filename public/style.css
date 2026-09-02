@@ -31,6 +31,12 @@
 
 * { box-sizing: border-box; }
 
+/* Kills the gray flash WebKit paints on every tap by default - with it on,
+   every icon button, bubble and row would flicker gray on touch, which is
+   the single biggest tell that a page isn't a native app. Our own :active
+   states (transform/scale below) take over as the tactile feedback. */
+* { -webkit-tap-highlight-color: transparent; }
+
 html, body {
   height: 100%;
   margin: 0;
@@ -40,6 +46,7 @@ html, body {
      the browser trying to keep a focused input in view when the keyboard
      opens) past the edge of our own dark background. */
   overflow: hidden;
+  overscroll-behavior: none;
   /* Same background on <html> as on <body>: covers any sliver that shows
      past the app's own box (overscroll bounce, viewport-unit rounding,
      the mobile keyboard animating) so it never flashes white. */
@@ -51,6 +58,14 @@ body {
   color: var(--ink);
   min-height: 100dvh;
   position: relative;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  /* Stops Safari from silently bumping every font-size on rotation to
+     "compensate" for the new column width - a text-reflow trick meant for
+     multi-column article pages, not an app UI, and it fights our own
+     16px-minimum sizing below. */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
 
 /* Faint fixed grain so flat dark surfaces don't feel sterile. Fixed +
@@ -95,6 +110,10 @@ body::before {
   align-items: center;
   justify-content: center;
   padding: 24px;
+  padding-top: max(24px, env(safe-area-inset-top));
+  padding-bottom: max(24px, env(safe-area-inset-bottom));
+  padding-left: max(24px, env(safe-area-inset-left));
+  padding-right: max(24px, env(safe-area-inset-right));
 }
 
 .login-card {
@@ -136,18 +155,69 @@ body::before {
   gap: 12px;
 }
 
+.code-input-wrap { position: relative; }
+
 #code-input {
+  width: 100%;
   border: 1px solid var(--border);
   background: var(--card-2);
   color: var(--ink);
   border-radius: 14px;
-  padding: 14px 16px;
-  font-size: 16px;
+  padding: 14px 44px 14px 16px;
+  font-size: 16px; /* iOS Safari zooms the whole page on focus below 16px */
   text-align: center;
   letter-spacing: 2px;
   outline: none;
+  -webkit-appearance: none;
+  appearance: none;
   transition: border-color .15s ease, box-shadow .15s ease;
 }
+
+/* Masks the code visually like a password field without type="password" -
+   Safari keys its Keychain/AutoFill-passwords bar off that type attribute
+   (and off id/name heuristics) far more aggressively than off styling, so
+   this is the one lever v11 hadn't tried yet for the AutoFill bar. Needs
+   confirming on a real iPhone (see HANDOFF). -webkit-text-security is
+   WebKit/Blink-only though (Firefox implements neither it nor the
+   standards-track text-security), so app.js feature-detects it at load and
+   falls all the way back to a real type="password" field - never plain
+   type="text" - when it isn't supported, so the code can't render as
+   plaintext anywhere.
+   text-align stays centered here to match the placeholder/typed-code look;
+   the reveal button below sits inside the same input on the right. */
+#code-input[data-mask="true"] {
+  -webkit-text-security: disc;
+}
+
+.code-reveal-btn {
+  position: absolute;
+  right: 4px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 32px;
+  height: 32px;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  touch-action: manipulation;
+}
+.code-reveal-btn svg { width: 19px; height: 19px; }
+.code-reveal-btn:active { color: var(--ink); background: rgba(255,255,255,0.06); }
+/* Slash shown = "code is hidden, tap to reveal"; hidden = "code is shown,
+   tap to hide" - matches the usual password-field eye affordance. */
+.code-reveal-btn .reveal-slash { opacity: 1; transition: opacity .12s ease; }
+.code-reveal-btn.is-revealed .reveal-slash { opacity: 0; }
+.code-reveal-btn.is-revealed { color: var(--accent); }
 
 #code-input::placeholder { color: var(--muted); }
 #code-input:focus { border-color: var(--accent); box-shadow: var(--ring); }
@@ -161,6 +231,10 @@ body::before {
   font-size: 15px;
   font-weight: 700;
   cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+  -webkit-user-select: none;
+  user-select: none;
   transition: transform .12s cubic-bezier(.32,.72,0,1), filter .15s ease, box-shadow .15s ease;
 }
 
@@ -181,12 +255,19 @@ body::before {
   align-items: center;
   gap: 10px;
   padding: 14px 18px;
+  padding-top: calc(14px + env(safe-area-inset-top));
+  padding-left: calc(18px + env(safe-area-inset-left));
+  padding-right: calc(18px + env(safe-area-inset-right));
   background: rgba(20, 22, 28, 0.75);
   border-bottom: 1px solid var(--border);
   backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
   position: sticky;
   top: 0;
   z-index: 5;
+  flex-shrink: 0;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 .dot {
@@ -195,6 +276,21 @@ body::before {
   border-radius: 50%;
   background: #63c07a;
   box-shadow: 0 0 0 3px rgba(99,192,122,0.2);
+}
+
+/* Repurposed from a purely decorative dot into a live presence indicator:
+   green (default, above) = the other person is online right now; this
+   dimmed state = they're not connected at the moment. Toggled from
+   updatePresenceIndicator() in app.js, driven by the server's SSE
+   presence/presence-init events. */
+.dot.offline {
+  background: #55606e;
+  box-shadow: 0 0 0 3px rgba(85,96,110,0.15);
+  transition: background 0.4s ease, box-shadow 0.4s ease;
+}
+
+.dot {
+  transition: background 0.4s ease, box-shadow 0.4s ease;
 }
 
 .title {
@@ -213,6 +309,9 @@ body::before {
   background: transparent;
   color: var(--muted);
   border-radius: 10px;
+  -webkit-appearance: none;
+  appearance: none;
+  -webkit-touch-callout: none;
 }
 
 .header-actions .icon-btn svg { width: 17px; height: 17px; }
@@ -223,7 +322,28 @@ body::before {
   flex: 1;
   min-height: 0; /* let it actually shrink to fit the viewport on Safari */
   overflow-y: auto;
+  /* Belt-and-suspenders against the horizontal-scroll bug a long unbroken
+     link caused before (see .bubble's overflow-wrap comment for the real
+     fix): even if some future bit of content still finds a way to render
+     wider than the row, this stops it from ever turning into a sideways-
+     scrolling chat - worst case that one element clips instead. */
+  overflow-x: hidden;
+  -webkit-overflow-scrolling: touch;
+  /* Tells Safari's gesture recognizer up front that only vertical panning
+     is a valid read of a touch that starts in here - without it, a scroll
+     gesture that starts near the left edge (bubbles can sit as close as
+     ~14px from it) has the same shape as the system edge-swipe-back
+     gesture, which overscroll-behavior alone can't suppress since that's a
+     scroll-chaining rule, not a gesture-recognition one. */
+  touch-action: pan-y;
+  /* Stops a rubber-band drag past the top/bottom of the message list from
+     "chaining" into the page behind it - without this, over-scrolling
+     #messages on iOS can bounce the whole html/body along with it for a
+     frame, which is exactly the kind of seam a native app never has. */
+  overscroll-behavior-y: contain;
   padding: 18px 14px 10px;
+  padding-left: calc(14px + env(safe-area-inset-left));
+  padding-right: calc(14px + env(safe-area-inset-right));
   display: flex;
   flex-direction: column;
   max-width: 720px;
@@ -239,6 +359,29 @@ body::before {
 .msg-row.me { align-self: flex-end; align-items: flex-end; }
 .msg-row.them { align-self: flex-start; align-items: flex-start; }
 
+/* Only messages that arrive live (SSE) animate in - the initial batch load
+   renders instantly so opening the app doesn't play a cascade of 40
+   staggered entrances. */
+.msg-row.msg-enter { animation: msg-enter .22s cubic-bezier(.2,.7,.3,1) both; }
+@keyframes msg-enter {
+  from { opacity: 0; transform: translateY(8px) scale(0.98); }
+  to { opacity: 1; transform: none; }
+}
+
+.date-divider {
+  align-self: center;
+  margin-top: 14px;
+  padding: 4px 12px;
+  background: var(--card-2);
+  border: 1px solid var(--border);
+  border-radius: 20px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+.date-divider:first-child { margin-top: 0; }
+
 /* Placeholder that keeps grouped "them" messages indented to line up with
    the avatar shown on the first message of the group. */
 .avatar-spacer { width: 26px; flex-shrink: 0; }
@@ -247,6 +390,14 @@ body::before {
   display: flex;
   align-items: flex-end;
   gap: 8px;
+  /* Flex item of .msg-row's column layout, sized via flex-start/flex-end
+     (not stretch) - without min-width:0 its default auto minimum floors
+     at the content's min-content size, so a single unbroken long word
+     (a link with no spaces) pushes it wider than .msg-row's max-width
+     instead of shrinking to fit and letting overflow-wrap actually break
+     it. Same fix already existed one level down on .msg-body; this is
+     the level above it that was still missing it. */
+  min-width: 0;
 }
 
 .msg-row.me .msg-line { flex-direction: row-reverse; }
@@ -281,15 +432,33 @@ body::before {
 }
 
 .bubble {
+  min-width: 0;
   padding: 10px 14px;
   border-radius: var(--radius);
   line-height: 1.45;
-  font-size: 15px;
-  word-wrap: break-word;
+  font-size: 16px; /* matches .text-input - compose and read at the same size */
+  /* overflow-wrap:anywhere (not just break-word) is what actually matters
+     here: .bubble sits in a shrink-to-fit column-flex box (see .msg-body),
+     and break-word alone doesn't count for THAT intrinsic-width
+     calculation - an unbroken run (a long link with no spaces) still
+     grows the bubble past .msg-row's max-width and forces the whole chat
+     to scroll sideways. anywhere does count for it, so the box itself
+     never grows wider than the row allows in the first place. */
+  overflow-wrap: anywhere;
   white-space: pre-wrap;
   border: 1px solid transparent;
-  box-shadow: 0 1px 3px rgba(0,0,0,0.25);
+  /* Real WhatsApp bubbles are flat - color contrast alone separates them.
+     With grouped messages sitting 3px apart, a real shadow on every bubble
+     stacks into a visible repeated emboss instead of one clean column, so
+     this is just enough to lift a bubble off the page background, not a
+     drop shadow anyone should consciously notice. */
+  box-shadow: 0 0.5px 0 rgba(0,0,0,0.14);
 }
+/* .msg-time floats inside the bubble (see below) so the last line of text
+   wraps around it, WhatsApp-style, instead of sitting on its own line
+   underneath. A float needs this to make the bubble's own height actually
+   contain it. */
+.bubble::after { content: ""; display: table; clear: both; }
 
 .msg-row.me .bubble {
   background: var(--bubble-me);
@@ -302,12 +471,133 @@ body::before {
   border-bottom-left-radius: 6px;
 }
 
+.msg-link {
+  color: var(--accent);
+  text-decoration: underline;
+  text-decoration-color: rgba(226, 137, 106, 0.4);
+  text-underline-offset: 2px;
+  /* Belongs to the same .bubble that already has overflow-wrap: anywhere,
+     but a link is exactly the "one long unbroken run" case that caused
+     the horizontal-scroll bug in the first place, so it gets its own
+     explicit rule too rather than relying purely on inheritance. */
+  overflow-wrap: anywhere;
+}
+.msg-link:active { opacity: 0.7; }
+
+/* Compact Open Graph preview card under a text bubble (see
+   buildLinkPreviewCard/applyLinkPreview in app.js). Every dimension here
+   is capped in some way - max-width:100% + min-width:0 so it can never be
+   the thing that grows a bubble past .msg-row's max-width again, and the
+   image/title/description are each height-capped below so one link with
+   an oversized og:image or a title with no spaces can't blow up a single
+   bubble's height either. */
+.link-preview-card {
+  display: flex;
+  flex-direction: column;
+  margin-top: 8px;
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: rgba(255, 255, 255, 0.03);
+  text-decoration: none;
+  color: inherit;
+  max-width: 100%;
+  min-width: 0;
+}
+.link-preview-card:active { background: rgba(255, 255, 255, 0.06); }
+
+.link-preview-img {
+  width: 100%;
+  max-height: 160px;
+  object-fit: cover;
+  display: block;
+  background: rgba(255, 255, 255, 0.05);
+}
+
+.link-preview-body {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 10px;
+  min-width: 0;
+}
+
+.link-preview-site {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.02em;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.link-preview-title {
+  font-size: 13.5px;
+  font-weight: 650;
+  color: var(--ink);
+  overflow-wrap: anywhere;
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.link-preview-desc {
+  font-size: 12.5px;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
 .bubble img, .bubble video {
   max-width: 100%;
   max-height: 320px;
   border-radius: 12px;
   display: block;
   cursor: pointer;
+  transition: filter .1s ease;
+}
+.bubble img:active, .bubble video:active { filter: brightness(0.85); }
+
+/* Wraps the actual <img>/<video> so the time pill below can anchor to the
+   media's real rendered size, not the bubble's full (padded) width - a
+   narrow image would otherwise leave the pill floating off to the side. */
+.bubble-media-wrap {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+  vertical-align: bottom;
+}
+
+.msg-time-overlay {
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #f2f2f2;
+  padding: 2px 7px;
+  border-radius: 10px;
+  pointer-events: none;
+  float: none;
+  margin: 0;
+}
+
+.ephemeral-countdown {
+  position: absolute;
+  left: 6px;
+  top: 6px;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 2px 7px;
+  border-radius: 10px;
+  pointer-events: none;
 }
 
 .bubble.file-bubble {
@@ -315,7 +605,9 @@ body::before {
   align-items: center;
   gap: 8px;
   cursor: pointer;
+  transition: background-color .1s ease;
 }
+.bubble.file-bubble:active { background: rgba(0,0,0,0.15); }
 
 .bubble.deleted {
   font-style: italic;
@@ -345,15 +637,16 @@ body::before {
 }
 
 .reply-quote:hover { background: rgba(0, 0, 0, 0.3); }
+.reply-quote:active { background: rgba(0, 0, 0, 0.38); }
 
 .reply-quote-sender {
-  font-size: 11.5px;
+  font-size: 11px;
   font-weight: 700;
   margin-bottom: 1px;
 }
 
 .reply-quote-snippet {
-  font-size: 12.5px;
+  font-size: 13px;
   color: var(--muted);
   display: -webkit-box;
   -webkit-line-clamp: 2;
@@ -362,30 +655,65 @@ body::before {
 }
 
 .msg-time {
-  font-size: 10px;
+  float: right;
+  clear: both;
+  font-size: 11px;
   color: var(--muted);
-  margin: 3px 6px 0;
+  margin: 4px 0 -2px 10px;
+  line-height: 1;
+  white-space: nowrap;
 }
+
+/* Locked "visualização única" placeholder bubble. */
+.bubble.ephemeral-locked {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: default;
+}
+.bubble.ephemeral-locked.is-interactive { cursor: pointer; touch-action: manipulation; transition: background-color .1s ease; }
+.bubble.ephemeral-locked.is-interactive:active { background: rgba(0,0,0,0.15); }
+.bubble.ephemeral-locked.is-opening { opacity: 0.7; }
+.ephemeral-icon { display: flex; flex-shrink: 0; color: var(--accent); }
+.ephemeral-icon svg { width: 18px; height: 18px; }
+.ephemeral-label { font-size: 15px; flex: 1; }
+.bubble.ephemeral-locked .msg-time { margin-left: 8px; }
 
 .msg-actions {
   display: flex;
-  gap: 10px;
-  margin: 2px 6px 0;
+  gap: 2px;
+  margin: 1px -6px 0;
 }
 
+/* Small icon buttons, not underlined text links - a permanent "reply |
+   delete" hyperlink under every bubble is the fastest way for a chat UI to
+   read as a web page instead of an app. Padding pads out the real tap
+   target well past the visible 14px icon without inflating the layout. */
 .msg-action-btn {
   border: none;
   background: transparent;
   color: var(--muted);
-  font-size: 10px;
   cursor: pointer;
-  padding: 0;
-  text-decoration: underline;
-  opacity: 0.7;
+  padding: 7px;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  opacity: 0.6;
+  -webkit-appearance: none;
+  appearance: none;
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
+  touch-action: manipulation;
+  transition: opacity .12s ease, background-color .12s ease, transform .1s cubic-bezier(.32,.72,0,1), color .12s ease;
 }
+.msg-action-btn svg { width: 14px; height: 14px; }
 
-.msg-action-btn:hover { opacity: 1; color: var(--ink); }
+.msg-action-btn:hover { opacity: 1; color: var(--ink); background: rgba(255,255,255,0.06); }
+.msg-action-btn:active { opacity: 1; transform: scale(0.88); background: rgba(255,255,255,0.1); }
 .msg-action-btn.is-danger:hover { color: var(--danger); }
+.msg-action-btn.is-danger:active { color: var(--danger); }
 
 .reply-bar {
   display: flex;
@@ -400,6 +728,7 @@ body::before {
   border-radius: 14px 14px 0 0;
   padding: 8px 10px 8px 0;
   overflow: hidden;
+  flex-shrink: 0;
 }
 
 .reply-bar-stripe {
@@ -418,7 +747,7 @@ body::before {
 }
 
 .reply-bar-snippet {
-  font-size: 12.5px;
+  font-size: 13px;
   color: var(--muted);
   white-space: nowrap;
   overflow: hidden;
@@ -439,27 +768,35 @@ body::before {
 
 .reply-bar-cancel svg { width: 15px; height: 15px; }
 .reply-bar-cancel:hover { color: var(--ink); background: rgba(255,255,255,0.06); }
+.reply-bar-cancel:active { color: var(--ink); background: rgba(255,255,255,0.1); transform: scale(0.9); }
+.reply-quote, .file-bubble, .reply-bar-cancel { touch-action: manipulation; }
 
 .composer {
   display: flex;
   align-items: center;
   gap: 8px;
   padding: 10px 14px 16px;
+  padding-bottom: calc(16px + env(safe-area-inset-bottom));
+  padding-left: calc(14px + env(safe-area-inset-left));
+  padding-right: calc(14px + env(safe-area-inset-right));
   max-width: 720px;
   width: 100%;
   margin: 0 auto;
+  flex-shrink: 0;
 }
 
 .name-input {
-  width: 84px;
+  width: 92px;
   flex-shrink: 0;
   border: 1px solid var(--border);
   background: var(--card-2);
   color: var(--ink);
   border-radius: 12px;
   padding: 10px 10px;
-  font-size: 12px;
+  font-size: 16px; /* iOS Safari zooms the whole page on focus below 16px */
   outline: none;
+  -webkit-appearance: none;
+  appearance: none;
 }
 
 .name-input::placeholder { color: var(--muted); }
@@ -477,6 +814,12 @@ body::before {
   display: flex;
   align-items: center;
   justify-content: center;
+  -webkit-appearance: none;
+  appearance: none;
+  -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
+  touch-action: manipulation;
   transition: background-color .15s ease, transform .12s cubic-bezier(.32,.72,0,1), box-shadow .15s ease;
 }
 
@@ -486,15 +829,28 @@ body::before {
 .icon-btn:active { transform: scale(0.93); }
 .icon-btn:focus-visible { box-shadow: var(--ring); outline: none; }
 
+/* Ephemeral ("visualização única") toggle, armed state - the next photo/
+   video sent will expire, so the button itself needs to visibly say so
+   rather than being a silent mode switch. */
+#ephemeral-toggle-btn.is-armed {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #201510;
+}
+#ephemeral-toggle-btn.is-armed:hover { background: var(--accent); filter: brightness(1.08); }
+
 .text-input {
   flex: 1;
+  min-width: 0;
   border: 1px solid var(--border);
   background: var(--card-2);
   color: var(--ink);
   border-radius: 20px;
   padding: 11px 16px;
-  font-size: 15px;
+  font-size: 16px; /* iOS Safari zooms the whole page on focus below 16px */
   outline: none;
+  -webkit-appearance: none;
+  appearance: none;
   transition: border-color .15s ease, box-shadow .15s ease;
 }
 
@@ -515,6 +871,11 @@ body::before {
   display: flex;
   align-items: center;
   justify-content: center;
+  -webkit-appearance: none;
+  appearance: none;
+  -webkit-user-select: none;
+  user-select: none;
+  touch-action: manipulation;
   transition: filter .15s ease, transform .12s cubic-bezier(.32,.72,0,1), box-shadow .15s ease;
 }
 
@@ -524,11 +885,17 @@ body::before {
 .send-btn:active { transform: scale(0.92); }
 .send-btn:focus-visible { box-shadow: var(--ring); outline: none; }
 
+/* Sending with empty text is already a no-op in app.js - this just gives
+   that state a visible signal instead of a button that looks equally
+   "ready" whether or not there's anything to send. */
+.send-btn.is-empty { opacity: 0.45; }
+
 .upload-progress {
   text-align: center;
   font-size: 12px;
   color: var(--muted);
   padding-bottom: 8px;
+  flex-shrink: 0;
 }
 
 /* ---- scroll-to-bottom floating button ---- */
@@ -539,8 +906,8 @@ body::before {
    bottom (toggled in app.js). */
 .scroll-bottom-btn {
   position: absolute;
-  right: 18px;
-  bottom: 88px;
+  right: calc(18px + env(safe-area-inset-right));
+  bottom: calc(88px + env(safe-area-inset-bottom));
   z-index: 6;
   box-shadow: var(--shadow-2);
 }
@@ -578,7 +945,7 @@ body::before {
 .toast {
   position: fixed;
   left: 50%;
-  bottom: 24px;
+  bottom: calc(24px + env(safe-area-inset-bottom));
   transform: translate(-50%, 8px);
   background: var(--card-2);
   border: 1px solid var(--border);
@@ -610,6 +977,8 @@ body::before {
   justify-content: center;
   z-index: 50;
   padding: 24px;
+  padding: max(24px, env(safe-area-inset-top)) max(24px, env(safe-area-inset-right)) max(24px, env(safe-area-inset-bottom)) max(24px, env(safe-area-inset-left));
+  overscroll-behavior: contain;
 }
 
 .lightbox img, .lightbox video {
@@ -620,8 +989,8 @@ body::before {
 
 .lightbox-close {
   position: absolute;
-  top: 18px;
-  right: 20px;
+  top: calc(18px + env(safe-area-inset-top));
+  right: calc(20px + env(safe-area-inset-right));
   background: rgba(255,255,255,0.1);
   border: none;
   color: var(--ink);
@@ -630,7 +999,14 @@ body::before {
   border-radius: 50%;
   font-size: 16px;
   cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+  -webkit-user-select: none;
+  user-select: none;
+  touch-action: manipulation;
+  transition: background-color .1s ease, transform .1s cubic-bezier(.32,.72,0,1);
 }
+.lightbox-close:active { background: rgba(255,255,255,0.18); transform: scale(0.92); }
 
 /* ---- confirm modal ---- */
 .confirm-overlay {
@@ -642,15 +1018,21 @@ body::before {
   justify-content: center;
   z-index: 60;
   padding: 24px;
+  padding: max(24px, env(safe-area-inset-top)) max(24px, env(safe-area-inset-right)) max(24px, env(safe-area-inset-bottom)) max(24px, env(safe-area-inset-left));
+  overscroll-behavior: contain;
 }
 
+/* Styled like an iOS action sheet - no filled buttons, hairline dividers,
+   text-only actions - rather than a generic centered web-dialog with two
+   filled pill buttons, which reads as Bootstrap/Material, not native. */
 .confirm-card {
   background: var(--card);
   border: 1px solid var(--border);
-  border-radius: 18px;
-  padding: 26px 24px;
+  border-radius: 16px;
+  padding: 22px 20px 0;
   width: 100%;
-  max-width: 340px;
+  max-width: 320px;
+  overflow: hidden;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.45);
 }
 
@@ -659,38 +1041,148 @@ body::before {
   font-size: 15px;
   line-height: 1.5;
   color: var(--ink);
+  text-align: center;
 }
 
 .confirm-actions {
   display: flex;
-  gap: 10px;
-  justify-content: flex-end;
+  margin: 0 -20px;
+  border-top: 1px solid var(--border);
 }
 
 .confirm-btn {
+  flex: 1;
+  background: transparent;
   border: none;
-  border-radius: 12px;
-  padding: 10px 16px;
-  font-size: 14px;
+  padding: 14px 10px;
+  font-size: 16px;
   font-weight: 600;
   cursor: pointer;
-}
-
-.confirm-cancel {
-  background: var(--card-2);
   color: var(--ink);
-  border: 1px solid var(--border);
+  -webkit-appearance: none;
+  appearance: none;
+  -webkit-user-select: none;
+  user-select: none;
+  touch-action: manipulation;
+  transition: background-color .1s ease;
 }
 
-.confirm-cancel:hover { background: var(--border); }
+.confirm-actions .confirm-btn + .confirm-btn { border-left: 1px solid var(--border); }
 
-.confirm-danger {
-  background: var(--danger);
-  color: #2a0f0b;
+.confirm-cancel { font-weight: 500; }
+.confirm-cancel:active { background: rgba(255,255,255,0.06); }
+
+.confirm-danger { color: var(--danger); }
+.confirm-danger:active { background: rgba(224,104,90,0.12); }
+
+/* Secret love counter reveal - same iOS-action-sheet card as the confirm
+   modal, with a small header (icon + title) and a short list of
+   sender/count rows above the single "Fechar" action. */
+.love-card { padding-top: 20px; }
+
+.love-header {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 16px;
 }
 
-.confirm-danger:hover { filter: brightness(1.08); }
+.love-icon { width: 28px; height: 28px; color: var(--accent); }
+
+.love-title {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 700;
+  color: var(--ink);
+}
+
+.love-list { margin: 0 0 18px; }
+
+.love-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 2px;
+  font-size: 15px;
+  border-bottom: 1px solid var(--border);
+}
+.love-row:last-child { border-bottom: none; }
+
+.love-row.love-empty {
+  justify-content: center;
+  color: var(--muted);
+  font-style: italic;
+  border-bottom: none;
+}
+
+.love-name { font-weight: 600; }
+.love-count { color: var(--accent); font-weight: 700; }
+
+/* Secret touch "Konami code" reward - a full-screen heart for a few
+   seconds. Non-interactive on purpose (pointer-events: none): it's a
+   celebratory flash, not a dialog, so it never blocks whatever the person
+   does next. */
+.konami-heart {
+  position: fixed;
+  inset: 0;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  background: rgba(5, 6, 9, 0.55);
+}
+
+.konami-heart-shape {
+  position: relative;
+  width: min(70vw, 58vh);
+  height: min(70vw, 58vh);
+  animation: konami-pop 0.4s cubic-bezier(0.32, 0.9, 0.4, 1.3);
+}
+
+.konami-heart-svg {
+  width: 100%;
+  height: 100%;
+  fill: var(--accent);
+  filter: drop-shadow(0 8px 28px rgba(226, 137, 106, 0.45));
+}
+
+.konami-heart-text {
+  position: absolute;
+  left: 50%;
+  top: 46%;
+  transform: translate(-50%, -50%);
+  width: 60%;
+  margin: 0;
+  text-align: center;
+  color: #fff;
+  font-weight: 700;
+  font-size: clamp(14px, 4.2vw, 22px);
+  line-height: 1.3;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+}
+
+@keyframes konami-pop {
+  0% { transform: scale(0.4); opacity: 0; }
+  60% { transform: scale(1.08); opacity: 1; }
+  100% { transform: scale(1); opacity: 1; }
+}
 
 @media (max-width: 480px) {
-  .name-input { width: 64px; }
+  .name-input { width: 72px; }
+}
+
+/* Landscape on a phone: the visual viewport gets very short (worse once
+   the keyboard is also up), so trim the breathing room that's fine in
+   portrait but eats into message space here. */
+@media (max-height: 420px) and (orientation: landscape) {
+  .messages { padding-top: 10px; }
+  .msg-row { margin-top: 8px; }
+  .composer { padding-top: 6px; padding-bottom: calc(8px + env(safe-area-inset-bottom)); }
+  /* The floating button's offset is tuned to clear the portrait composer's
+     height - the landscape composer above is noticeably shorter, so match
+     it here instead of leaving the button floating too high. */
+  .scroll-bottom-btn { bottom: calc(62px + env(safe-area-inset-bottom)); }
 }
