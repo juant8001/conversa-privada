@@ -2,8 +2,14 @@
 <html lang="pt-br">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover" />
 <meta name="robots" content="noindex, nofollow, noarchive" />
+<meta name="theme-color" content="#14161c" />
+<meta name="color-scheme" content="dark" />
+<meta name="format-detection" content="telephone=no, date=no, address=no, email=no" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
 <title>conversa</title>
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23e2896a' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M4 5.5A2.5 2.5 0 0 1 6.5 3h11A2.5 2.5 0 0 1 20 5.5v8A2.5 2.5 0 0 1 17.5 16H10l-4.5 4v-4H6.5A2.5 2.5 0 0 1 4 13.5v-8Z'/%3E%3C/svg%3E" />
 <link rel="stylesheet" href="style.css" />
@@ -17,7 +23,12 @@
     </div>
     <p class="login-hint">Digite o código de acesso</p>
     <form id="login-form">
-      <input id="code-input" type="password" inputmode="text" autocomplete="off" placeholder="código" />
+      <div class="code-input-wrap">
+        <input id="code-input" type="text" inputmode="text" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" data-mask="true" placeholder="código" />
+        <button type="button" id="code-reveal-btn" class="code-reveal-btn" title="Mostrar código" aria-label="Mostrar código">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12Z"/><circle cx="12" cy="12" r="3"/><path class="reveal-slash" d="M4 4l16 16"/></svg>
+        </button>
+      </div>
       <button type="submit">Entrar</button>
     </form>
     <p id="login-error" class="error"></p>
@@ -68,9 +79,12 @@
   </div>
 
   <form id="composer" class="composer">
-    <input id="name-input" class="name-input" type="text" placeholder="seu nome" maxlength="60" autocomplete="off" name="not-a-real-name-field" />
-    <input id="file-input" type="file" hidden />
-    <button type="button" id="attach-btn" class="icon-btn" title="Anexar foto/vídeo">
+    <input id="name-input" class="name-input" type="text" placeholder="seu nome" maxlength="60" autocomplete="off" name="not-a-real-name-field" autocapitalize="words" autocorrect="off" spellcheck="false" />
+    <input id="file-input" type="file" hidden multiple accept="image/*,video/*,audio/*" />
+    <button type="button" id="ephemeral-toggle-btn" class="icon-btn" title="Ativar visualização única (mídia expira 10s depois de aberta)" aria-pressed="false">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>
+    </button>
+    <button type="button" id="attach-btn" class="icon-btn" title="Anexar foto/vídeo (pode escolher vários)">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M17.5 8.5 9.9 16a3 3 0 1 1-4.2-4.2l8.5-8.5a2 2 0 1 1 2.8 2.8L8.7 14.4a1 1 0 1 1-1.4-1.4l6.6-6.6"/></svg>
     </button>
     <input id="text-input" class="text-input" type="text" placeholder="escreva uma mensagem..." autocomplete="off" />
@@ -79,6 +93,12 @@
     </button>
   </form>
   <div id="upload-progress" class="upload-progress hidden"></div>
+</div>
+
+<div id="decoy-screen" class="screen hidden">
+  <div class="login-card decoy-card">
+    <p class="login-hint">Ferramenta ainda não completamente desenvolvida.</p>
+  </div>
 </div>
 
 <div id="toast" class="toast hidden"></div>
@@ -97,6 +117,26 @@
       <button id="confirm-cancel" class="confirm-btn confirm-cancel">Cancelar</button>
       <button id="confirm-ok" class="confirm-btn confirm-danger">Continuar</button>
     </div>
+  </div>
+</div>
+
+<div id="love-overlay" class="confirm-overlay love-overlay hidden">
+  <div class="confirm-card love-card">
+    <div class="love-header">
+      <svg viewBox="0 0 24 24" fill="currentColor" class="love-icon"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
+      <p class="love-title">Contador secreto</p>
+    </div>
+    <div id="love-list" class="love-list"></div>
+    <div class="confirm-actions">
+      <button id="love-close" class="confirm-btn">Fechar</button>
+    </div>
+  </div>
+</div>
+
+<div id="konami-heart" class="konami-heart hidden" aria-hidden="true">
+  <div class="konami-heart-shape">
+    <svg viewBox="0 0 24 24" class="konami-heart-svg" aria-hidden="true"><path d="M12 21.35l-1.45-1.32C5.4 15.36 2 12.28 2 8.5 2 5.42 4.42 3 7.5 3c1.74 0 3.41.81 4.5 2.09C13.09 3.81 14.76 3 16.5 3 19.58 3 22 5.42 22 8.5c0 3.78-3.4 6.86-8.55 11.54L12 21.35z"/></svg>
+    <p class="konami-heart-text">Teo + Juan = pra sempre</p>
   </div>
 </div>
 

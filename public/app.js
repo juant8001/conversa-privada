@@ -30,6 +30,7 @@
 
   const loginScreen = document.getElementById('login-screen');
   const chatScreen = document.getElementById('chat-screen');
+  const decoyScreen = document.getElementById('decoy-screen');
   const loginForm = document.getElementById('login-form');
   const codeInput = document.getElementById('code-input');
   const codeRevealBtn = document.getElementById('code-reveal-btn');
@@ -1197,7 +1198,17 @@
   function showLogin() {
     loginScreen.classList.remove('hidden');
     chatScreen.classList.add('hidden');
+    decoyScreen.classList.add('hidden');
     codeInput.focus();
+  }
+
+  // Tela-armadilha: nada de mensagens, SSE ou qualquer chamada que toque o
+  // chat de verdade - só o texto fixo, pra quem digitou o código-armadilha
+  // não ver nada além disso.
+  function showDecoy() {
+    loginScreen.classList.add('hidden');
+    chatScreen.classList.add('hidden');
+    decoyScreen.classList.remove('hidden');
   }
 
   async function showChat() {
@@ -1220,7 +1231,10 @@
         body: JSON.stringify({ code }),
       });
       const data = await res.json();
-      if (res.ok && data.ok) {
+      if (res.ok && data.ok && data.decoy) {
+        codeInput.value = '';
+        showDecoy();
+      } else if (res.ok && data.ok) {
         codeInput.value = '';
         showChat();
       } else {
