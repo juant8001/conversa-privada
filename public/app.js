@@ -219,9 +219,21 @@
   // Secret "você me ama?" counter. Typing (and sending) a variant of that
   // question doesn't post a real message - it's intercepted client-side
   // and instead reveals, only to whoever typed it, how many times each
-  // person has said some variant of "eu te amo" across the visible
-  // history. Purely local: never touches the server, never shows up in
-  // export or on the other person's screen unless they trigger it too.
+  // person has said some variant of "eu te amo", EVER (a lifetime tally,
+  // not just what's currently on screen). Purely local: never touches the
+  // server, never shows up in export or on the other person's screen
+  // unless they trigger it too.
+  //
+  // Persisted in localStorage (LOVE_STATS_KEY) rather than recomputed live
+  // from messageLog like it originally was - the live version looked
+  // correct but silently reset to zero every time the underlying messages
+  // went away (deleting a single "eu te amo" message, or "Limpar
+  // conversa" wiping the whole history), because it was just re-counting
+  // whatever text messages happened to still be rendered. countedIds
+  // remembers which message ids already contributed to the tally so the
+  // same message is never double-counted across page reloads (every
+  // reload re-renders full history from the server) while still letting
+  // the count survive that message being deleted later.
   function stripAccents(s) {
     return String(s || '').normalize('NFD').replace(/[̀-ͯ]/g, '');
   }
@@ -242,16 +254,43 @@
     return LOVE_TRIGGERS.includes(normalizeLoveText(text));
   }
 
-  function countLoveMessages() {
-    const counts = new Map();
-    for (const { sender, text } of messageLog.values()) {
-      if (!text) continue;
-      const n = normalizeLoveText(text);
-      if (LOVE_PHRASES.some((phrase) => n.includes(phrase))) {
-        counts.set(sender, (counts.get(sender) || 0) + 1);
-      }
+  const LOVE_STATS_KEY = 'private-chat:love-stats';
+  function loadLoveStats() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(LOVE_STATS_KEY) || 'null');
+      return {
+        counts: (parsed && typeof parsed.counts === 'object' && parsed.counts) || {},
+        countedIds: (parsed && typeof parsed.countedIds === 'object' && parsed.countedIds) || {},
+      };
+    } catch {
+      return { counts: {}, countedIds: {} };
     }
-    return counts;
+  }
+  const loveStats = loadLoveStats();
+  function saveLoveStats() {
+    try {
+      localStorage.setItem(LOVE_STATS_KEY, JSON.stringify(loveStats));
+    } catch {
+      // Best-effort only (private/full storage) - the in-memory tally for
+      // this page load still works, it just won't survive a reload.
+    }
+  }
+
+  // Called once per rendered text message (see renderMessage) - counts it
+  // into the lifetime tally the first time this exact message id is ever
+  // seen, then never again, so later deleting that message (individually
+  // or via "Limpar conversa") can't make the tally go back down.
+  function recordLoveMessageIfNeeded(id, sender, text) {
+    if (!text || loveStats.countedIds[id]) return;
+    const n = normalizeLoveText(text);
+    if (!LOVE_PHRASES.some((phrase) => n.includes(phrase))) return;
+    loveStats.countedIds[id] = true;
+    loveStats.counts[sender] = (loveStats.counts[sender] || 0) + 1;
+    saveLoveStats();
+  }
+
+  function countLoveMessages() {
+    return new Map(Object.entries(loveStats.counts));
   }
 
   function showLoveCounter() {
@@ -395,7 +434,6 @@
   function resetMessagesView() {
     messagesEl.querySelectorAll('.msg-row, .date-divider').forEach((el) => el.remove());
     renderedIds = new Set();
-    messageLog = new Map();
     authorSide = new Map();
     lastRow = null;
     lastSender = null;
@@ -414,13 +452,6 @@
 
   let renderedIds = new Set();
   let es = null;
-
-  // Backs the secret "you love me?" counter Easter egg (see isLoveTrigger/
-  // showLoveCounter below): id -> { sender, text } for every currently-
-  // visible TEXT message that isn't deleted. Kept in sync as messages
-  // render and as deletions come in, so the count always matches what's
-  // actually on screen right now - never sent to or read from the server.
-  let messageLog = new Map();
 
   // Tracks the previously-rendered row/sender/time so consecutive messages
   // from the same author can be visually grouped (tighter spacing, avatar/
@@ -819,7 +850,7 @@
     if (renderedIds.has(m.id)) return;
     renderedIds.add(m.id);
     if (m.type === 'text' && !m.deleted && m.text) {
-      messageLog.set(m.id, { sender: m.sender, text: m.text });
+      recordLoveMessageIfNeeded(m.id, m.sender, m.text);
     }
     const animate = !!(opts && opts.animate);
 
@@ -968,7 +999,6 @@
   }
 
   function applyDeletedPlaceholder(id, expiredEphemeral, deletedBy) {
-    messageLog.delete(id);
     const row = messagesEl.querySelector(`[data-id="${id}"]`);
     if (!row) return;
     const bubble = row.querySelector('.bubble');

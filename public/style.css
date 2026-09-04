@@ -555,6 +555,21 @@ body::before {
 }
 
 .bubble img, .bubble video {
+  /* width/height ATTRIBUTES on the element (set in app.js from the real
+     intrinsic size, see readMediaDimensions) act as low-priority
+     presentational hints that map straight to the CSS width/height
+     properties - i.e. they behave as if "width:4032px;height:3024px"
+     were set directly. Without the two lines below, max-width and
+     max-height each clamp that hinted width/height INDEPENDENTLY (one by
+     percent, one by px), squashing/stretching the image into a box that
+     ignores its real aspect ratio. Forcing width/height back to auto
+     lets the sizing algorithm derive the missing dimension from the
+     image intrinsic ratio while still respecting both caps - same fix
+     as the classic "img { max-width:100%; height:auto; }" responsive
+     pattern, just needed on both axes here since a chat bubble caps
+     both width (max-width) and height (max-height) at once. */
+  width: auto;
+  height: auto;
   max-width: 100%;
   max-height: 320px;
   border-radius: 12px;
