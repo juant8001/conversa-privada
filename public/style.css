@@ -474,12 +474,10 @@ body::before {
      this is just enough to lift a bubble off the page background, not a
      drop shadow anyone should consciously notice. */
   box-shadow: 0 0.5px 0 rgba(0,0,0,0.14);
-  /* Toque longo sobre o balão abre o menu de contexto (Responder/Copiar/
-     Apagar), então o balão não pode iniciar seleção de texto nem o callout
-     nativo do iOS - mesmo comportamento do WhatsApp/Telegram, onde segurar
-     uma mensagem nunca seleciona o texto (copiar é item do menu). */
-  -webkit-user-select: none;
-  user-select: none;
+  /* O texto do balão precisa continuar selecionável (seleção normal do
+     navegador), então só o callout nativo do iOS fica desligado aqui - o
+     menu de toque longo (Responder/Copiar/Apagar) é aberto via pointerdown
+     em attachMenuGestures, que não depende de user-select pra funcionar. */
   -webkit-touch-callout: none;
 }
 .msg-row.me .bubble {
@@ -630,6 +628,8 @@ body::before {
   pointer-events: none;
   float: none;
   margin: 0;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 .ephemeral-countdown {
@@ -716,6 +716,8 @@ body::before {
   color: var(--muted);
   line-height: 1;
   white-space: nowrap;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 /* Vão invisível no fim do texto, da largura da hora - é o que deixa a
@@ -1223,6 +1225,9 @@ body::before {
   opacity: 0;
   transform: scale(0.94);
   transition: opacity .12s ease, transform .14s cubic-bezier(.32,.72,0,1);
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
 }
 .msg-menu.is-in { opacity: 1; transform: scale(1); }
 
@@ -1281,6 +1286,8 @@ body::before {
   -webkit-appearance: none;
   appearance: none;
   -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
   touch-action: manipulation;
   transition: background-color .1s ease, transform .1s ease;
 }
