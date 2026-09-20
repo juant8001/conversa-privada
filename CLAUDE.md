@@ -246,12 +246,16 @@ persisted in `localStorage`; heavy use of the Visual Viewport API to fight the
 iOS keyboard/URL-bar layout jitter.
 
 **Client-side identity.** `NAME_KEY` stores the display name, and `myName()`
-reads it live off the composer's name field. That name *is* the identity: an
-exact (trimmed) `m.sender === myName()` decides which side a bubble renders on
-(`.msg-row me/them`), matches the server's view-once sender check
-(`server.js`) and drives presence filtering. Because the layout depends on it,
-it can't be empty — `showChat()` routes a browser with no stored name to the
-`#name-screen` gate before `enterChat()` renders anything, and renaming calls
-`rerenderLoadedMessages()` so existing bubbles switch sides. The view-once
-permission check deliberately spells out `m.sender === myName()` instead of
-reusing the presentational `mine` flag.
+reads it live off the composer's name field. That name *is* the identity: a
+case-insensitive (trimmed) `sameName(m.sender, myName())` decides which side a
+bubble renders on (`.msg-row me/them`), matches the server's view-once sender
+check (`server.js`'s `sameSender`) and drives presence filtering — so typing
+"Ana" on one device and "ana" on another is still recognized as the same
+person. The stored/displayed `sender` string keeps whatever casing was typed
+at send time; only comparisons are case-folded. Because the layout depends on
+it, it can't be empty — `showChat()` routes a browser with no stored name to
+the `#name-screen` gate before `enterChat()` renders anything, and renaming
+calls `rerenderLoadedMessages()` so existing bubbles switch sides. The
+view-once permission check deliberately spells out
+`sameName(m.sender, myName())` instead of reusing the presentational `mine`
+flag.

@@ -4,6 +4,7 @@ require('./lib/env')();
 
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 const crypto = require('crypto');
 const express = require('express');
 const multer = require('multer');
@@ -15,6 +16,10 @@ const auth = require('./lib/auth');
 const { randomId } = require('./lib/crypto');
 
 const PORT = parseInt(process.env.PORT || '4177', 10);
+// Default fica em 127.0.0.1 (só a própria máquina). Setar HOST=0.0.0.0 expõe
+// na rede local também — útil pra testar do celular pelo Wi-Fi, mas assume o
+// mesmo risco de qualquer app na LAN sem esse limite.
+const HOST = process.env.HOST || '127.0.0.1';
 const ROOM_SLUG = process.env.ROOM_SLUG;
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data');
 const MAX_UPLOAD_MB = parseInt(process.env.MAX_UPLOAD_MB || '300', 10);
@@ -75,6 +80,13 @@ const URL_IN_TEXT_RE = /(https?:\/\/[^\s<>"']+)/i;
 // less for correctness (the client-rendered href already excludes this)
 // than for making sure the preview is actually fetched for the same link
 // the person sees rendered as clickable.
+// A pessoa é identificada pelo nome digitado, que ela pode capitalizar de
+// forma diferente entre sessões/dispositivos ("Ana" num, "ana" noutro) - a
+// identidade tem que reconhecer isso como a mesma pessoa.
+function sameSender(a, b) {
+  return !!a && !!b && String(a).trim().toLowerCase() === String(b).trim().toLowerCase();
+}
+
 function stripTrailingPunctuationServer(raw) {
   while (raw.length) {
     const last = raw[raw.length - 1];
@@ -407,6 +419,7 @@ function buildReplySnapshot(data, replyToId) {
   const original = data.messages.find((m) => m.id === String(replyToId));
   if (!original) return undefined;
   let snippet;
+  let thumbId;
   if (original.expiredEphemeral) {
     snippet = 'Mídia de visualização única (expirada)';
   } else if (original.deleted) {
@@ -421,8 +434,16 @@ function buildReplySnapshot(data, replyToId) {
     snippet = original.text.length > 140 ? `${original.text.slice(0, 140)}...` : original.text;
   } else {
     snippet = REPLY_SNIPPET_LABELS[original.type] || 'Arquivo';
+    // thumbId (ou o mediaId, só pra foto: um <img> num .mp4 cru baixaria o
+    // arquivo inteiro e não decodificaria nada) - só é seguro pegar aqui,
+    // no branch que já garante que o original não é ephemeral nem deletado.
+    if (original.type === 'image' || original.type === 'video') {
+      thumbId = original.thumbId || (original.type === 'image' ? original.mediaId : undefined);
+    }
   }
-  return { id: original.id, sender: original.sender, snippet };
+  const result = { id: original.id, sender: original.sender, snippet };
+  if (thumbId) result.thumbId = thumbId;
+  return result;
 }
 
 // Paginação "mais recentes primeiro": sem parâmetros, devolve só o último
@@ -622,7 +643,7 @@ roomRouter.post('/api/messages/:id/view', requireAuth, express.json(), (req, res
     if (msg.deleted) {
       return res.status(410).json({ error: 'expired', message: 'Essa mídia já expirou.' });
     }
-    if (msg.sender === String(requesterName).trim()) {
+    if (sameSender(msg.sender, requesterName)) {
       return res.status(403).json({ error: 'forbidden', message: 'Quem enviou não pode abrir uma mídia de visualização única.' });
     }
     if (!msg.viewedAt) {
@@ -699,7 +720,7 @@ roomRouter.post('/api/messages/:id/react', requireAuth, express.json(), (req, re
 
     const name = String(requesterName).trim();
     if (!Array.isArray(msg.reactions)) msg.reactions = [];
-    const i = msg.reactions.findIndex((r) => r.sender === name);
+    const i = msg.reactions.findIndex((r) => sameSender(r.sender, name));
     if (i >= 0 && msg.reactions[i].emoji === emoji) {
       msg.reactions.splice(i, 1);
     } else if (i >= 0) {
@@ -973,6 +994,20 @@ roomRouter.get('/api/export', requireAuth, (req, res) => {
 
 app.use((req, res) => res.status(404).end());
 
-app.listen(PORT, '127.0.0.1', () => {
-  console.log(`Chat privado rodando em http://127.0.0.1:${PORT}${ROOM_PATH}`);
+function lanAddress() {
+  const nets = os.networkInterfaces();
+  for (const addrs of Object.values(nets)) {
+    for (const addr of addrs) {
+      if (addr.family === 'IPv4' && !addr.internal) return addr.address;
+    }
+  }
+  return null;
+}
+
+app.listen(PORT, HOST, () => {
+  console.log(`Chat privado rodando em http://${HOST}:${PORT}${ROOM_PATH}`);
+  if (HOST === '0.0.0.0') {
+    const lan = lanAddress();
+    if (lan) console.log(`Na rede local: http://${lan}:${PORT}${ROOM_PATH}`);
+  }
 });

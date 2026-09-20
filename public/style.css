@@ -474,13 +474,38 @@ body::before {
      this is just enough to lift a bubble off the page background, not a
      drop shadow anyone should consciously notice. */
   box-shadow: 0 0.5px 0 rgba(0,0,0,0.14);
-  /* Toque longo sobre o balão abre o menu de contexto (Responder/Copiar/
-     Apagar), então o balão não pode iniciar seleção de texto nem o callout
-     nativo do iOS - mesmo comportamento do WhatsApp/Telegram, onde segurar
-     uma mensagem nunca seleciona o texto (copiar é item do menu). */
-  -webkit-user-select: none;
-  user-select: none;
+  /* O texto do balão precisa continuar selecionável no mouse (seleção normal
+     do navegador em desktop), então só o callout nativo do iOS fica
+     desligado aqui - o menu de toque longo (Responder/Copiar/Apagar) é
+     aberto via pointerdown em attachMenuGestures, que não depende de
+     user-select pra funcionar. */
   -webkit-touch-callout: none;
+}
+/* Em telas de toque, porém, deixar o texto selecionável competia com o
+   próprio toque longo: navegador via iniciar a seleção nativa (às vezes se
+   espalhando pela tela toda com um leve arrasto do dedo) bem no meio da
+   janela de detecção do nosso timer, disputando o mesmo gesto. Como o menu
+   de toque longo já tem "Copiar", a seleção nativa por arrasto não faz falta
+   aqui - só desliga pra ponteiro grosso (touch), o mouse continua como
+   estava. */
+@media (pointer: coarse) {
+  .bubble {
+    -webkit-user-select: none;
+    user-select: none;
+  }
+}
+/* "Selecionar texto" no menu (ver msgMenuSelectBtn em app.js) arma esta
+   classe num balão específico: religa seleção e o callout nativo do iOS só
+   nele, e attachMenuGestures passa a ignorar esse balão (resolve() devolve
+   null), então o próximo toque longo vira toque longo *nativo* de verdade -
+   handles de seleção do sistema, sem nosso menu/backdrop competindo pelo
+   mesmo gesto. Precedência sobre a regra de pointer:coarse acima por vir
+   depois dela no arquivo. */
+.bubble.text-select-armed {
+  -webkit-user-select: text;
+  user-select: text;
+  -webkit-touch-callout: default;
+  box-shadow: var(--ring);
 }
 .msg-row.me .bubble {
   background: var(--bubble-me);
@@ -598,9 +623,22 @@ body::before {
      both width (max-width) and height (max-height) at once. */
   width: auto;
   height: auto;
-  max-width: 100%;
+  /* NOT max-width:100% - .bubble-media-wrap/.bubble/.msg-body never have a
+     definite width of their own (.msg-body is a flex column with
+     align-items:flex-end/flex-start, not stretch), so a percentage here has
+     no definite containing-block width to resolve against and can size
+     differently pre-load vs. after the real file decodes - the exact cause
+     of bubbles visibly growing once an image finishes loading. --media-max-w
+     (set by updateMediaMaxWidth in app.js, mirroring .msg-row's max-width:
+     78% at line ~386) is an absolute px value instead, which has no such
+     ambiguity; .msg-row's own resolved cap still keeps everything below it
+     from overflowing regardless. */
+  max-width: var(--media-max-w, 260px);
   max-height: 320px;
-  border-radius: 12px;
+  /* No radius of its own - .bubble:has(.bubble-media-wrap) below clips it
+     to the BUBBLE's own radius instead, which varies (18px normally, 6px
+     on the last "tail" bubble of a group - see .msg-row.me/them .bubble).
+     Keeping a fixed radius here would drift out of sync with that. */
   display: block;
   cursor: pointer;
   transition: filter .1s ease;
@@ -614,8 +652,30 @@ body::before {
 .bubble-media-wrap {
   position: relative;
   display: inline-block;
-  max-width: 100%;
+  /* Same reasoning as .bubble img's max-width above - a percentage here is
+     just as indefinite. */
+  max-width: var(--media-max-w, 260px);
   vertical-align: bottom;
+  /* Photos/videos sit flush against the bubble's edge (no visible padding
+     ring around them) like every other chat app - .bubble's own padding
+     (10px/14px) is meant for text. Negative margins bleed the wrap out
+     into that padding on every side it touches; updateMediaMaxWidth
+     (app.js) already computes --media-max-w assuming media doesn't have
+     that padding to fit inside, so there's no separate width fix needed
+     here. A reply-quote coming first (see buildBubbleContent) keeps its
+     own top inset via the rule below - only the quote needs the padding,
+     not the media under it. */
+  margin: -10px -14px;
+}
+.reply-quote + .bubble-media-wrap {
+  margin-top: 0;
+}
+/* Clips the media to the bubble's own (dynamic) corner radius instead of
+   giving .bubble img/video a fixed radius that could fall out of sync
+   with it - box-shadow/outline still escape overflow:hidden, so the
+   bubble's outer look elsewhere is untouched. */
+.bubble:has(.bubble-media-wrap) {
+  overflow: hidden;
 }
 
 .msg-time-overlay {
@@ -630,6 +690,8 @@ body::before {
   pointer-events: none;
   float: none;
   margin: 0;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 .ephemeral-countdown {
@@ -672,6 +734,9 @@ body::before {
 }
 
 .reply-quote {
+  display: flex;
+  align-items: center;
+  gap: 8px;
   border-left: 3px solid var(--accent);
   background: rgba(0, 0, 0, 0.18);
   border-radius: 8px;
@@ -683,6 +748,21 @@ body::before {
 
 .reply-quote:hover { background: rgba(0, 0, 0, 0.3); }
 .reply-quote:active { background: rgba(0, 0, 0, 0.38); }
+
+/* .reply-quote fica dentro de .bubble, e ".bubble img" (mais abaixo) tem
+   mais especificidade que uma classe sozinha (class+elemento > 1 classe) -
+   sem esse escopo extra, width/height:auto de lá vence e a miniatura
+   nasce do tamanho do cap de mídia da bolha (260x320), não 36x36. */
+.reply-quote .reply-quote-thumb {
+  /* Mesmo tamanho do .reply-bar-thumb. */
+  width: 36px;
+  height: 36px;
+  border-radius: 6px;
+  object-fit: cover;
+  flex-shrink: 0;
+}
+
+.reply-quote-text { min-width: 0; flex: 1; }
 
 .reply-quote-sender {
   font-size: 11px;
@@ -716,6 +796,8 @@ body::before {
   color: var(--muted);
   line-height: 1;
   white-space: nowrap;
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 /* Vão invisível no fim do texto, da largura da hora - é o que deixa a
@@ -769,6 +851,15 @@ body::before {
   flex-shrink: 0;
 }
 
+.reply-bar-thumb {
+  width: 36px;
+  height: 36px;
+  border-radius: 6px;
+  object-fit: cover;
+  flex-shrink: 0;
+  display: block;
+}
+
 .reply-bar-body { min-width: 0; flex: 1; }
 
 .reply-bar-sender {
@@ -803,7 +894,7 @@ body::before {
 
 .composer {
   display: flex;
-  align-items: center;
+  align-items: flex-end;
   gap: 8px;
   padding: 10px 14px 16px;
   padding-bottom: calc(16px + env(safe-area-inset-bottom));
@@ -816,8 +907,7 @@ body::before {
 }
 
 .name-input {
-  width: 92px;
-  flex-shrink: 0;
+  width: 100%;
   border: 1px solid var(--border);
   background: var(--card-2);
   color: var(--ink);
@@ -859,33 +949,46 @@ body::before {
 .icon-btn:active { transform: scale(0.93); }
 .icon-btn:focus-visible { box-shadow: var(--ring); outline: none; }
 
-/* Ephemeral ("visualização única") toggle, armed state - the next photo/
-   video sent will expire, so the button itself needs to visibly say so
-   rather than being a silent mode switch. */
-#ephemeral-toggle-btn.is-armed {
-  background: var(--accent);
-  border-color: var(--accent);
-  color: #201510;
-}
-#ephemeral-toggle-btn.is-armed:hover { background: var(--accent); filter: brightness(1.08); }
-
-.text-input {
+/* border-radius doesn't clip a scrollbar (browsers draw it as a straight
+   rectangle regardless), so at max-height the textarea's own scrollbar poked
+   out past the rounded corners. This wrapper owns the border/background/
+   radius plus overflow:hidden, which clips the inner textarea's scrollbar to
+   the curve; the textarea itself is borderless/transparent inside it. */
+.text-input-wrap {
   flex: 1;
   min-width: 0;
   border: 1px solid var(--border);
   background: var(--card-2);
-  color: var(--ink);
   border-radius: 20px;
-  padding: 11px 16px;
-  font-size: 16px; /* iOS Safari zooms the whole page on focus below 16px */
-  outline: none;
-  -webkit-appearance: none;
-  appearance: none;
+  overflow: hidden;
   transition: border-color .15s ease, box-shadow .15s ease;
 }
 
+.text-input-wrap:focus-within { border-color: var(--accent); box-shadow: var(--ring); }
+
+.text-input {
+  display: block;
+  width: 100%;
+  border: none;
+  background: transparent;
+  color: var(--ink);
+  padding: 8px 16px;
+  font-size: 16px; /* iOS Safari zooms the whole page on focus below 16px */
+  line-height: 1.4;
+  outline: none;
+  -webkit-appearance: none;
+  appearance: none;
+  resize: none;
+  /* 1 linha fica do mesmo tamanho dos botões redondos ao lado (o wrap soma
+     2px de borda); min-height é o piso mesmo se o auto-resize errar por um
+     instante (ex.: recalculado com a tela ainda escondida). */
+  min-height: 38px;
+  max-height: 160px; /* ~6 lines; beyond that it scrolls internally */
+  overflow-y: auto;
+  font-family: inherit;
+}
+
 .text-input::placeholder { color: var(--muted); }
-.text-input:focus { border-color: var(--accent); box-shadow: var(--ring); }
 
 .name-input:focus { border-color: var(--accent); box-shadow: var(--ring); }
 
@@ -937,7 +1040,7 @@ body::before {
 .scroll-bottom-btn {
   position: absolute;
   right: calc(18px + env(safe-area-inset-right));
-  bottom: calc(88px + env(safe-area-inset-bottom));
+  bottom: calc(88px + env(safe-area-inset-bottom) + var(--reply-bar-h, 0px));
   z-index: 6;
   box-shadow: var(--shadow-2);
 }
@@ -1203,6 +1306,15 @@ body::before {
   inset: 0;
   z-index: 55;
   background: transparent;
+  /* Cobre a tela toda por cima de tudo enquanto o menu está aberto (é ele
+     quem recebe o clique que fecha o menu). Sem isso, um mousedown aqui -
+     mesmo sem nenhum texto próprio - ainda conseguia iniciar um arrasto de
+     seleção nativa; o navegador então "resolvia" o ponto pro nó de texto
+     selecionável mais próximo no DOM em vez de desistir, varrendo a
+     conversa inteira por baixo. user-select:none barra o arrasto de
+     seleção já na origem. */
+  -webkit-user-select: none;
+  user-select: none;
 }
 
 /* Cartãozinho flutuante, mesma linguagem do .confirm-card: superfície
@@ -1223,6 +1335,9 @@ body::before {
   opacity: 0;
   transform: scale(0.94);
   transition: opacity .12s ease, transform .14s cubic-bezier(.32,.72,0,1);
+  -webkit-user-select: none;
+  user-select: none;
+  -webkit-touch-callout: none;
 }
 .msg-menu.is-in { opacity: 1; transform: scale(1); }
 
@@ -1255,6 +1370,27 @@ body::before {
 .msg-menu-item.is-danger svg { color: var(--danger); }
 .msg-menu-item.is-danger:active { background: rgba(224,104,90,0.12); }
 
+/* Separa grupos dentro de um mesmo menu flutuante (câmera: "tirar foto/
+   vídeo" vs. "anexar da galeria"; +: nome vs. galeria/backup), sem
+   precisar de outra estrutura de menu só pra isso. */
+.msg-menu-divider {
+  height: 1px;
+  background: var(--border);
+  margin: 4px 6px;
+}
+
+/* Campo de nome dentro do menu "+" - único item do menu que não é um
+   .msg-menu-item clicável, então ganha seu próprio espaçamento. */
+.msg-menu-name {
+  padding: 6px 14px 10px;
+}
+.msg-menu-name-label {
+  display: block;
+  color: var(--muted);
+  font-size: 12px;
+  margin-bottom: 6px;
+}
+
 /* Barra de reação no topo do menu de contexto: 6 emojis fixos. */
 .msg-menu-reactions {
   display: flex;
@@ -1281,6 +1417,8 @@ body::before {
   -webkit-appearance: none;
   appearance: none;
   -webkit-touch-callout: none;
+  -webkit-user-select: none;
+  user-select: none;
   touch-action: manipulation;
   transition: background-color .1s ease, transform .1s ease;
 }
@@ -1493,10 +1631,6 @@ body::before {
   100% { transform: scale(1); opacity: 1; }
 }
 
-@media (max-width: 480px) {
-  .name-input { width: 72px; }
-}
-
 /* Landscape on a phone: the visual viewport gets very short (worse once
    the keyboard is also up), so trim the breathing room that's fine in
    portrait but eats into message space here. */
@@ -1504,8 +1638,9 @@ body::before {
   .messages { padding-top: 10px; }
   .msg-row { margin-top: 8px; }
   .composer { padding-top: 6px; padding-bottom: calc(8px + env(safe-area-inset-bottom)); }
+  .text-input { max-height: 90px; }
   /* The floating button's offset is tuned to clear the portrait composer's
      height - the landscape composer above is noticeably shorter, so match
      it here instead of leaving the button floating too high. */
-  .scroll-bottom-btn { bottom: calc(62px + env(safe-area-inset-bottom)); }
+  .scroll-bottom-btn { bottom: calc(62px + env(safe-area-inset-bottom) + var(--reply-bar-h, 0px)); }
 }

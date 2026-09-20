@@ -24,6 +24,12 @@
   // down, once #messages and isNearBottom() exist (see "keyboard-aware
   // scroll" below) - it needs to read the OLD layout before setAppHeight
   // touches it, so it owns the setAppHeight() call for that listener too.
+  // updateMediaMaxWidth (defined further down, near syncViewportHeight) is
+  // also re-run from there on a visualViewport resize; this plain listener
+  // is just the fallback for whenever that doesn't fire (unlike setAppHeight
+  // above, kept unconditional since a plain window resize on desktop isn't
+  // guaranteed to also fire visualViewport's).
+  window.addEventListener('resize', updateMediaMaxWidth);
 
   const roomPath = location.pathname.replace(/\/$/, ''); // e.g. /c/<slug>
   const api = (p) => `${roomPath}${p}`;
@@ -43,8 +49,17 @@
   const nameInput = document.getElementById('name-input');
   const textInput = document.getElementById('text-input');
   const fileInput = document.getElementById('file-input');
-  const attachBtn = document.getElementById('attach-btn');
-  const ephemeralToggleBtn = document.getElementById('ephemeral-toggle-btn');
+  const cameraInput = document.getElementById('camera-input');
+  const plusBtn = document.getElementById('plus-btn');
+  const plusMenu = document.getElementById('plus-menu');
+  const plusMenuBackdrop = document.getElementById('plus-menu-backdrop');
+  const cameraBtn = document.getElementById('camera-btn');
+  const cameraMenu = document.getElementById('camera-menu');
+  const cameraMenuBackdrop = document.getElementById('camera-menu-backdrop');
+  const cameraMenuNormalBtn = document.getElementById('camera-menu-normal');
+  const cameraMenuEphemeralBtn = document.getElementById('camera-menu-ephemeral');
+  const cameraMenuAttachBtn = document.getElementById('camera-menu-attach');
+  const cameraMenuAttachEphemeralBtn = document.getElementById('camera-menu-attach-ephemeral');
   const exportBtn = document.getElementById('export-btn');
   const clearBtn = document.getElementById('clear-btn');
   const logoutBtn = document.getElementById('logout-btn');
@@ -75,15 +90,20 @@
   const toastEl = document.getElementById('toast');
   const presenceDotEl = document.querySelector('.chat-header .dot');
   const replyBar = document.getElementById('reply-bar');
+  const replyBarThumb = document.getElementById('reply-bar-thumb');
   const replyBarSender = document.getElementById('reply-bar-sender');
   const replyBarSnippet = document.getElementById('reply-bar-snippet');
   const replyBarCancel = document.getElementById('reply-bar-cancel');
+  // Se a miniatura falhar ao carregar (ex: mídia original apagada), some
+  // sem mais - mesma tolerância a falha do preview de link.
+  replyBarThumb.addEventListener('error', () => replyBarThumb.classList.add('hidden'));
   const scrollBottomBtn = document.getElementById('scroll-bottom-btn');
   const msgMenu = document.getElementById('msg-menu');
   const msgMenuBackdrop = document.getElementById('msg-menu-backdrop');
   const msgMenuGotoBtn = document.getElementById('msg-menu-goto');
   const msgMenuReplyBtn = document.getElementById('msg-menu-reply');
   const msgMenuCopyBtn = document.getElementById('msg-menu-copy');
+  const msgMenuSelectBtn = document.getElementById('msg-menu-select');
   const msgMenuDelBtn = document.getElementById('msg-menu-delete');
   const msgMenuReactions = document.getElementById('msg-menu-reactions');
   const reactionPicks = msgMenu.querySelectorAll('.reaction-pick');
@@ -154,17 +174,42 @@
   }
 
   let replyingTo = null;
+  // Mesma regra do buildMediaTile (aba Mídia): prefere thumbId, cai pro
+  // mediaId só pra foto (nunca vídeo - um <img> num .mp4 cru baixa o
+  // arquivo inteiro e não decodifica nada), e nunca pra ephemeral (que já
+  // chega sem thumbId/mediaId, sanitizado pelo servidor).
+  function replyThumbId(m) {
+    if (m.ephemeral) return undefined;
+    if (m.type === 'image') return m.thumbId || m.mediaId;
+    if (m.type === 'video') return m.thumbId;
+    return undefined;
+  }
   function setReplyingTo(m) {
     replyingTo = { id: m.id, sender: m.sender, snippet: snippetFor(m) };
     replyBarSender.textContent = m.sender;
     replyBarSender.style.color = nameColor(m.sender);
     replyBarSnippet.textContent = replyingTo.snippet;
+    const thumbId = replyThumbId(m);
+    if (thumbId) {
+      replyBarThumb.src = api(`/api/media/${thumbId}`);
+      replyBarThumb.classList.remove('hidden');
+    } else {
+      replyBarThumb.classList.add('hidden');
+      replyBarThumb.removeAttribute('src');
+    }
     replyBar.classList.remove('hidden');
+    // scroll-bottom-btn's offset accounts for this so it floats above the
+    // reply bar instead of on top of it (see .scroll-bottom-btn in style.css).
+    // O thumb tem tamanho fixo no CSS, então isso é seguro antes dele carregar.
+    document.documentElement.style.setProperty('--reply-bar-h', `${replyBar.offsetHeight}px`);
     textInput.focus();
   }
   function clearReplyingTo() {
     replyingTo = null;
     replyBar.classList.add('hidden');
+    replyBarThumb.classList.add('hidden');
+    replyBarThumb.removeAttribute('src');
+    document.documentElement.style.setProperty('--reply-bar-h', '0px');
   }
   replyBarCancel.addEventListener('click', clearReplyingTo);
 
@@ -262,7 +307,7 @@
   // login), not on every dropped/retried connection.
   let announcedPresenceOnEntry = false;
   function otherPeopleOnline(online) {
-    return (online || []).filter((n) => n && n !== myName());
+    return (online || []).filter((n) => n && !sameName(n, myName()));
   }
   function updatePresenceIndicator(online) {
     if (!presenceDotEl) return;
@@ -336,8 +381,10 @@
     // E o nosso timer de toque longo quase juntos): não reposiciona, ignora.
     if (activeMenuMsgId === id) return;
 
-    // "Copiar" só faz sentido em texto.
-    msgMenuCopyBtn.classList.toggle('hidden', m.type !== 'text' || !m.text);
+    // "Copiar" e "Selecionar texto" só fazem sentido em texto.
+    const isSelectableText = m.type === 'text' && !!m.text;
+    msgMenuCopyBtn.classList.toggle('hidden', !isSelectableText);
+    msgMenuSelectBtn.classList.toggle('hidden', !isSelectableText);
     msgMenuGotoBtn.classList.add('hidden');   // já estamos na conversa
     msgMenuReplyBtn.classList.remove('hidden');
     msgMenuDelBtn.classList.remove('hidden');
@@ -346,7 +393,7 @@
     // Barra de reação: destaca o emoji com que EU já reagi (se reagi). Fica
     // visível pra qualquer mensagem não apagada - openMessageMenu já saiu
     // acima em m.deleted.
-    const myReaction = (m.reactions || []).find((r) => r.sender === myName());
+    const myReaction = (m.reactions || []).find((r) => sameName(r.sender, myName()));
     reactionPicks.forEach((b) => {
       b.classList.toggle('is-mine', !!myReaction && b.dataset.emoji === myReaction.emoji);
     });
@@ -364,6 +411,7 @@
     msgMenuGotoBtn.classList.remove('hidden');
     msgMenuReplyBtn.classList.add('hidden');
     msgMenuCopyBtn.classList.add('hidden');
+    msgMenuSelectBtn.classList.add('hidden');
     msgMenuDelBtn.classList.add('hidden');
     msgMenuReactions.classList.add('hidden');
 
@@ -451,18 +499,80 @@
     closeMessageMenu();
     if (m) setReplyingTo(m);
   });
+  // navigator.clipboard só existe em contexto seguro (https, ou http em
+  // localhost) - testando pelo IP da rede local (npm run start:lan) a
+  // página é http "de verdade" pro browser, então a API some e cai sempre
+  // no fallback abaixo. document.execCommand('copy') é obsoleto mas
+  // funciona em http comum: seleciona o texto de um textarea fora da tela
+  // e pede pro navegador copiar a seleção atual.
+  function legacyCopy(text) {
+    const ta = document.createElement('textarea');
+    ta.value = text;
+    ta.setAttribute('readonly', '');
+    ta.style.position = 'fixed';
+    ta.style.top = '-1000px';
+    ta.style.left = '-1000px';
+    document.body.appendChild(ta);
+    ta.select();
+    ta.setSelectionRange(0, text.length); // iOS ignora .select() sozinho
+    let ok = false;
+    try {
+      ok = document.execCommand('copy');
+    } catch (_) { /* segue pro toast de falha */ }
+    document.body.removeChild(ta);
+    return ok;
+  }
+
   msgMenuCopyBtn.addEventListener('click', () => {
     const m = loadedMessages.find((x) => x.id === activeMenuMsgId);
     closeMessageMenu();
     if (!m || !m.text) return;
-    if (!navigator.clipboard || !navigator.clipboard.writeText) {
-      toast('Cópia não suportada neste navegador.');
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(m.text)
+        .then(() => toast('Mensagem copiada.'))
+        .catch(() => {
+          toast(legacyCopy(m.text) ? 'Mensagem copiada.' : 'Não foi possível copiar.');
+        });
       return;
     }
-    navigator.clipboard.writeText(m.text)
-      .then(() => toast('Mensagem copiada.'))
-      .catch(() => toast('Não foi possível copiar.'));
+    toast(legacyCopy(m.text) ? 'Mensagem copiada.' : 'Cópia não suportada neste navegador.');
   });
+
+  // "Selecionar texto": em toque, o próprio toque longo já é tomado pelo
+  // nosso menu (ver a regra @media (pointer: coarse) em .bubble no CSS), e
+  // não dá pra "emprestar" pro navegador uma seleção nativa já em
+  // andamento - o gesto de arrastar os alças de seleção do sistema só
+  // começa a partir de um toque longo cru, sem nosso timer no meio. Por
+  // isso este item não seleciona nada sozinho: ele desarma nosso gesto
+  // NESSE balão (attachMenuGestures passa a ignorá-lo, ver resolve() logo
+  // abaixo) e liga user-select nele via .text-select-armed, então o
+  // PRÓXIMO toque longo ali vira um toque longo nativo de verdade.
+  let armedBubbleEl = null;
+  function disarmSelectableBubble() {
+    if (!armedBubbleEl) return;
+    armedBubbleEl.classList.remove('text-select-armed');
+    armedBubbleEl = null;
+    document.removeEventListener('pointerdown', onOutsideArmedPointerdown, true);
+    document.removeEventListener('keydown', onArmedKey);
+  }
+  function onOutsideArmedPointerdown(e) {
+    if (armedBubbleEl && !armedBubbleEl.contains(e.target)) disarmSelectableBubble();
+  }
+  function onArmedKey(e) {
+    if (e.key === 'Escape') disarmSelectableBubble();
+  }
+  msgMenuSelectBtn.addEventListener('click', () => {
+    const id = activeMenuMsgId;
+    closeMessageMenu();
+    disarmSelectableBubble();
+    const bubble = id && messagesEl.querySelector(`.msg-row[data-id="${id}"] .bubble`);
+    if (!bubble) return;
+    armedBubbleEl = bubble;
+    bubble.classList.add('text-select-armed');
+    document.addEventListener('pointerdown', onOutsideArmedPointerdown, true);
+    document.addEventListener('keydown', onArmedKey);
+  });
+
   msgMenuDelBtn.addEventListener('click', () => {
     const id = activeMenuMsgId;
     closeMessageMenu();           // fecha antes: askConfirm assume a tela
@@ -487,6 +597,14 @@
   //
   // `resolve(e)` devolve { el, id } pro alvo sob o evento, ou null se aquele
   // ponto não é um alvo válido. `open(id, at)` abre o menu do modo certo.
+  // Safari no iOS nunca implementou a Vibration API, então navigator.vibrate
+  // não faz nada lá - sem feedback tátil nesse caso.
+  function triggerHaptic() {
+    try {
+      if (navigator.vibrate) navigator.vibrate(8);
+    } catch (_) { /* ignora - vibrate pode ser bloqueado por permissions policy */ }
+  }
+
   function attachMenuGestures(rootEl, scrollEl, resolve, open) {
     let lpTimer = null;
     let lpStartX = 0;
@@ -521,7 +639,7 @@
       cancelLongPress();
       lpTimer = setTimeout(() => {
         lpTimer = null;
-        if (navigator.vibrate) navigator.vibrate(8);
+        triggerHaptic();
         suppressClickUntil = Date.now() + 700;
         open(hit.id, {
           rect: hit.el.getBoundingClientRect(),
@@ -558,6 +676,9 @@
   attachMenuGestures(messagesEl, messagesEl, (e) => {
     const bubble = e.target.closest('.bubble');
     if (!bubble || bubble.classList.contains('deleted')) return null;
+    // Balão armado por "Selecionar texto": esse toque longo é do navegador,
+    // não nosso - ver msgMenuSelectBtn acima.
+    if (bubble.classList.contains('text-select-armed')) return null;
     // Controles nativos de áudio/vídeo precisam do gesto pra eles.
     if (e.type === 'pointerdown' && e.target.closest('audio, video')) return null;
     const row = bubble.closest('.msg-row');
@@ -884,9 +1005,16 @@
     return (nameInput.value || '').trim();
   }
 
+  // A pessoa pode digitar o nome com capitalização diferente entre
+  // sessões/dispositivos ("Ana" num, "ana" noutro) - a comparação de
+  // identidade precisa ignorar isso.
+  function sameName(a, b) {
+    return !!a && !!b && a.trim().toLowerCase() === b.trim().toLowerCase();
+  }
+
   async function handleDeleteClick(id) {
     if (!myName()) {
-      nameInput.focus();
+      focusNameInput();
       return;
     }
     const ok = await askConfirm('Apagar esta mensagem para os dois? Vai ficar marcado que você apagou.', 'Apagar');
@@ -1079,7 +1207,7 @@
   async function sendReaction(id, emoji) {
     if (!REACTION_EMOJIS.includes(emoji)) return;
     if (!myName()) {
-      nameInput.focus();
+      focusNameInput();
       return;
     }
     try {
@@ -1110,7 +1238,7 @@
       }
       const agg = byEmoji.get(r.emoji);
       agg.count += 1;
-      if (r.sender === myName()) agg.mine = true;
+      if (sameName(r.sender, myName())) agg.mine = true;
     }
     for (const emoji of order) {
       const agg = byEmoji.get(emoji);
@@ -1179,6 +1307,28 @@
       if (m.width && m.height) {
         img.width = m.width;
         img.height = m.height;
+        // Belt-and-suspenders alongside the width/height attributes above:
+        // an explicit aspect-ratio doesn't depend on the browser's own
+        // attribute->aspect-ratio UA-stylesheet mapping, which is a newer,
+        // lower-priority mechanism that's more prone to timing differences
+        // between an early layout pass and the one after the file decodes.
+        // Must stay paired with width:auto;height:auto in .bubble img (style
+        // .css) - forcing explicit width/height there instead would squash
+        // the image, see that rule's own comment.
+        img.style.aspectRatio = `${m.width} / ${m.height}`;
+        // None of the above actually reserves space by itself: .bubble has
+        // no width of its own (it hugs its content), and a replaced element
+        // sized only via aspect-ratio contributes ~0 to that shrink-to-fit
+        // measurement until naturalWidth/naturalHeight are known - a real
+        // Chromium/WebKit gap, confirmed by instrumenting a real page load.
+        // The whole bubble collapses to just its padding for the window
+        // between "message rendered" and "enough bytes downloaded to read
+        // the image header", which is exactly the "loads tiny then pops to
+        // size" bug this is fixing. reserveMediaBox sets an explicit pixel
+        // width/height up front (same contain math the browser applies
+        // post-load) so the ancestor's fit-content pass always has a
+        // definite number to work with, load state or not.
+        reserveMediaBox(img, m.width, m.height);
       }
       img.addEventListener('click', () => openLightbox('image', img.src));
       wrap.appendChild(img);
@@ -1203,6 +1353,9 @@
       if (m.width && m.height) {
         vid.width = m.width;
         vid.height = m.height;
+        // See the matching comments in the image branch above.
+        vid.style.aspectRatio = `${m.width} / ${m.height}`;
+        reserveMediaBox(vid, m.width, m.height);
       }
       wrap.appendChild(vid);
       wrap.appendChild(makeTimeEl(m.ts, true));
@@ -1337,16 +1490,17 @@
     const color = nameColor(m.sender);
     // Lado da bolha = quem está olhando a tela, como em qualquer mensageiro:
     // o que EU mandei vai pra direita, o resto pra esquerda. A identidade é o
-    // nome de exibição comparado exatamente (trim), o mesmo critério que o
-    // servidor usa pra "visualização única" (server.js) e que a presença usa
-    // em otherPeopleOnline - uma noção só de identidade no app inteiro.
-    // Por isso myName() não pode estar vazio: showChat() exige o nome antes de
-    // renderizar qualquer mensagem, e renomear re-renderiza a lista.
-    const mine = m.sender === myName();
+    // nome de exibição comparado sem diferenciar maiúsculas/minúsculas
+    // (sameName), o mesmo critério que o servidor usa pra "visualização
+    // única" (server.js) e que a presença usa em otherPeopleOnline - uma
+    // noção só de identidade no app inteiro. Por isso myName() não pode
+    // estar vazio: showChat() exige o nome antes de renderizar qualquer
+    // mensagem, e renomear re-renderiza a lista.
+    const mine = sameName(m.sender, myName());
     // Same author as the message right before this one, sent within the
     // grouping window → render as part of the same visual group instead of
     // a brand-new block.
-    const grouped = lastSender === m.sender && lastTs !== null && (m.ts - lastTs) < GROUP_GAP_MS;
+    const grouped = sameName(lastSender, m.sender) && lastTs !== null && (m.ts - lastTs) < GROUP_GAP_MS;
 
     const row = document.createElement('div');
     row.className = `msg-row ${mine ? 'me' : 'them'}${grouped ? ' grouped' : ''}${animate ? ' msg-enter' : ''}`;
@@ -1401,16 +1555,33 @@
       // propósito: hoje as duas expressões são a mesma coisa, mas `mine` é o
       // lado VISUAL da bolha e isto aqui é uma permissão. Se o critério de
       // lado mudar de novo, quem pode abrir mídia de visualização única tem
-      // que continuar preso à identidade real - m.sender === myName() - ou
-      // alguém veria a própria foto enviada como um "toque para ver" clicável
-      // e levaria um 403 sem explicação do servidor, que já recusa isso
-      // (ver server.js).
-      buildEphemeralLockedContent(bubble, m, m.sender === myName());
+      // que continuar preso à identidade real - sameName(m.sender, myName())
+      // - ou alguém veria a própria foto enviada como um "toque para ver"
+      // clicável e levaria um 403 sem explicação do servidor, que já recusa
+      // isso (ver server.js).
+      buildEphemeralLockedContent(bubble, m, sameName(m.sender, myName()));
     } else {
       if (m.replyTo) {
         const quote = document.createElement('div');
         quote.className = 'reply-quote';
         quote.style.borderColor = nameColor(m.replyTo.sender);
+        if (m.replyTo.thumbId) {
+          const qThumb = document.createElement('img');
+          qThumb.className = 'reply-quote-thumb';
+          qThumb.alt = '';
+          // Diferente do IntersectionObserver da aba Mídia: aqui toda
+          // mensagem carregada renderiza a citação de cara, então o
+          // loading="lazy" nativo evita uma rajada de /api/media num
+          // histórico longo (jumpToMessage, rerenderLoadedMessages).
+          qThumb.loading = 'lazy';
+          qThumb.src = api(`/api/media/${m.replyTo.thumbId}`);
+          // Mídia original apagada depois da resposta -> 404 silencioso,
+          // só some a miniatura.
+          qThumb.addEventListener('error', () => qThumb.remove());
+          quote.appendChild(qThumb);
+        }
+        const qText = document.createElement('div');
+        qText.className = 'reply-quote-text';
         const qSender = document.createElement('div');
         qSender.className = 'reply-quote-sender';
         qSender.style.color = nameColor(m.replyTo.sender);
@@ -1418,8 +1589,9 @@
         const qSnippet = document.createElement('div');
         qSnippet.className = 'reply-quote-snippet';
         qSnippet.textContent = m.replyTo.snippet;
-        quote.appendChild(qSender);
-        quote.appendChild(qSnippet);
+        qText.appendChild(qSender);
+        qText.appendChild(qSnippet);
+        quote.appendChild(qText);
         // jumpToMessage e não scrollToMessage: antes, clicar numa citação de
         // mensagem fora do lote carregado só dava o toast de "nao esta mais
         // visivel". Com o ?from= no lugar, o salto funciona de verdade.
@@ -1775,6 +1947,7 @@
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'Escape') return;
     if (activeMenuMsgId !== null) return;
+    if (cameraMenuCtl.isOpen() || plusMenuCtl.isOpen()) return;
     if (!lightbox.classList.contains('hidden')) {
       lightbox.classList.add('hidden');
     } else if (isMediaPanelOpen()) {
@@ -1942,10 +2115,75 @@
   function syncViewportHeight() {
     const stickToBottom = isNearBottom();
     setAppHeight();
+    updateMediaMaxWidth();
     requestAnimationFrame(() => {
       if (window.scrollX !== 0 || window.scrollY !== 0) window.scrollTo(0, 0);
       if (stickToBottom) messagesEl.scrollTop = messagesEl.scrollHeight;
     });
+  }
+
+  // Percentage max-width on .bubble img/.bubble-media-wrap can't resolve
+  // reliably (the ancestor chain down to .msg-body never has a definite
+  // width of its own - see the comment above .bubble img in style.css).
+  // Mirror .msg-row's own 78% cap (style.css ~line 386) as an absolute px
+  // value instead, kept live via --media-max-w so every bubble picks it up
+  // automatically, including ones already rendered.
+  function updateMediaMaxWidth() {
+    const cs = getComputedStyle(messagesEl);
+    const padL = parseFloat(cs.paddingLeft) || 0;
+    const padR = parseFloat(cs.paddingRight) || 0;
+    const rowW = (messagesEl.clientWidth - padL - padR) * 0.78; // keep in sync with .msg-row's max-width:78%
+    // Just avatar(26)+.msg-line gap(8), shared conservatively for both sides -
+    // NOT .bubble's own padding too: media bubbles render edge-to-edge now
+    // (see .bubble-media-wrap in style.css), so there's no padding of theirs
+    // left to reserve room for.
+    const reserve = 34;
+    const maxW = Math.max(120, Math.floor(rowW - reserve));
+    messagesEl.style.setProperty('--media-max-w', `${maxW}px`);
+    // reserveMediaBox's placeholder box (see its own comment) was computed
+    // against whatever --media-max-w was at render time - refresh it for
+    // anything still waiting on its real size, so a keyboard open/close
+    // mid-download doesn't leave the placeholder sized for the old
+    // viewport. Loaded media doesn't need this: it's already back to plain
+    // CSS sizing, which already tracks --media-max-w live on its own.
+    messagesEl.querySelectorAll('.bubble img, .bubble video').forEach((el) => {
+      const loaded = el.tagName === 'IMG' ? el.complete : el.readyState >= 1;
+      if (loaded) return;
+      const w = parseInt(el.getAttribute('width'), 10);
+      const h = parseInt(el.getAttribute('height'), 10);
+      if (w && h) reserveMediaBox(el, w, h);
+    });
+  }
+
+  const MEDIA_MAX_H = 320; // keep in sync with .bubble img/video's max-height in style.css
+
+  // See the call sites in buildBubbleContent for why this exists: .bubble
+  // has no width of its own (it hugs its content), and a replaced element
+  // sized only via CSS aspect-ratio contributes ~0 to that shrink-to-fit
+  // measurement until the browser actually knows the file's real
+  // dimensions - so without this, the whole bubble collapses to just its
+  // padding until the image/video has downloaded enough to report a
+  // natural size. Sets an explicit width/height up front, using the exact
+  // same contain-within-max-width/max-height math the browser itself
+  // applies once loaded (mirrors CSS2.1 10.4's replaced-element sizing:
+  // clamp to max-width first, then re-clamp to max-height from there),
+  // so there's never a mismatch to visibly snap into once it does.
+  // Released back to width:auto/height:auto (+ aspect-ratio, + the real
+  // natural size the browser now has) the moment the file actually loads,
+  // so live resizing via --media-max-w keeps working exactly as before
+  // this existed.
+  function reserveMediaBox(el, width, height) {
+    const cs = getComputedStyle(messagesEl);
+    const maxW = parseFloat(cs.getPropertyValue('--media-max-w')) || 260;
+    let w = width;
+    let h = height;
+    if (w > maxW) { h = h * (maxW / w); w = maxW; }
+    if (h > MEDIA_MAX_H) { w = w * (MEDIA_MAX_H / h); h = MEDIA_MAX_H; }
+    el.style.width = `${Math.round(w)}px`;
+    el.style.height = `${Math.round(h)}px`;
+    const release = () => { el.style.width = ''; el.style.height = ''; };
+    el.addEventListener(el.tagName === 'VIDEO' ? 'loadedmetadata' : 'load', release, { once: true });
+    el.addEventListener('error', release, { once: true });
   }
   if (window.visualViewport) {
     window.visualViewport.addEventListener('resize', syncViewportHeight);
@@ -2013,15 +2251,56 @@
     const newAnchor = anchorId
       ? messagesEl.querySelector(`.msg-row[data-id="${anchorId}"]`)
       : null;
-    if (newAnchor) {
-      // Assinala o scroll em absoluto (zera → mede a âncora nessa base → posiciona)
-      // em vez de "+=", pra não depender de onde o navegador deixou o scrollTop
-      // depois do teardown/re-render nem do scroll-anchoring dele.
+    // Assinala o scroll em absoluto (zera → mede a âncora nessa base → posiciona)
+    // em vez de "+=", pra não depender de onde o navegador deixou o scrollTop
+    // depois do teardown/re-render nem do scroll-anchoring dele.
+    const reanchor = () => {
+      if (!newAnchor) return;
       messagesEl.scrollTop = 0;
       messagesEl.scrollTop = newAnchor.getBoundingClientRect().top - anchorTop;
-    }
+    };
+    reanchor();
     updateScrollBtn();
     updateEmptyState();
+    if (!newAnchor) return;
+
+    // Every row just got recreated, so all their media elements are fresh
+    // <img>/<video> nodes that haven't loaded/decoded yet - anything the
+    // reanchor() above just lined up against can still reflow as each one
+    // settles (most visibly for legacy messages with no stored width/height
+    // to reserve space with). Same load/error + rAF-batched-correction
+    // pattern as scrollToBottomWhenReady's queueScrollCorrection, but
+    // re-running THIS anchor correction instead of scrolling to bottom -
+    // and cancelled the moment the person actually scrolls/touches/types,
+    // so it never fights someone reading.
+    let cancelled = false;
+    const cancel = () => {
+      cancelled = true;
+      messagesEl.removeEventListener('wheel', cancel);
+      messagesEl.removeEventListener('touchstart', cancel);
+      messagesEl.removeEventListener('keydown', cancel);
+    };
+    messagesEl.addEventListener('wheel', cancel, { once: true, passive: true });
+    messagesEl.addEventListener('touchstart', cancel, { once: true, passive: true });
+    messagesEl.addEventListener('keydown', cancel, { once: true });
+
+    let correctionQueued = false;
+    function queueReanchor() {
+      if (cancelled || correctionQueued) return;
+      correctionQueued = true;
+      requestAnimationFrame(() => {
+        correctionQueued = false;
+        if (!cancelled) reanchor();
+      });
+    }
+    messagesEl.querySelectorAll('img, video, audio').forEach((el) => {
+      const ready = el.tagName === 'IMG' ? el.complete : el.readyState >= 1;
+      if (ready) return;
+      const evt = el.tagName === 'IMG' ? 'load' : 'loadedmetadata';
+      el.addEventListener(evt, queueReanchor, { once: true });
+      el.addEventListener('error', queueReanchor, { once: true });
+    });
+    setTimeout(cancel, 800); // matches scrollToBottomWhenReady's own settle window
   }
 
   // Busca o lote imediatamente anterior ao que já está carregado e redesenha a
@@ -2094,13 +2373,16 @@
       // Only auto-follow to the new message if the person was already at
       // (or very near) the bottom — otherwise this would yank them away
       // from older messages they're in the middle of reading. They still
-      // get the floating button to jump down whenever they want.
+      // get the floating button to jump down whenever they want. A message
+      // this person just sent themselves is the exception: sending is a
+      // deliberate action, so always follow it down regardless of where
+      // they were scrolled.
       const wasNearBottom = isNearBottom();
       const m = JSON.parse(evt.data);
       loadedMessages.push(m);
       renderMessage(m, { animate: true });
       addMediaItemToTop(m);
-      if (wasNearBottom) {
+      if (wasNearBottom || sameName(m.sender, myName())) {
         scrollToBottomWhenReady();
       } else {
         updateScrollBtn();
@@ -2200,6 +2482,14 @@
     loginScreen.classList.add('hidden');
     nameScreen.classList.add('hidden');
     chatScreen.classList.remove('hidden');
+    // #chat-screen is display:none até aqui, então a chamada de
+    // syncTextInputUI() lá embaixo (que roda no carregamento do script, com
+    // a tela ainda escondida) mediu scrollHeight 0 e deixou o textarea com
+    // height:0px preso no inline style. Recalcula agora que o layout é real.
+    autoResizeTextInput();
+    // Same reasoning: #messages has no real clientWidth until the screen is
+    // actually visible, so this can only run now, before the first render.
+    updateMediaMaxWidth();
     await loadMessages();
     connectStream();
     textInput.focus();
@@ -2236,24 +2526,24 @@
     const text = textInput.value.trim();
     const sender = myName();
     if (!sender) {
-      nameInput.focus();
+      focusNameInput();
       return;
     }
     if (!text) return;
     if (isLoveTrigger(text)) {
       textInput.value = '';
-      updateSendBtnState();
+      syncTextInputUI();
       showLoveCounter();
       return;
     }
     if (isKonamiEmojiTrigger(text)) {
       textInput.value = '';
-      updateSendBtnState();
+      syncTextInputUI();
       showKonamiHeart();
       return;
     }
     textInput.value = '';
-    updateSendBtnState();
+    syncTextInputUI();
     const replyToId = replyingTo ? replyingTo.id : undefined;
     clearReplyingTo();
     try {
@@ -2264,33 +2554,159 @@
       });
     } catch (err) {
       textInput.value = text;
-      updateSendBtnState();
+      syncTextInputUI();
     }
   });
 
+  // Enter envia no desktop (mouse/trackpad); Shift+Enter quebra linha. No
+  // toque não há gesto prático pra Shift+Enter, entao Enter sempre quebra
+  // linha e o envio fica só pelo botão. isComposing/keyCode 229 evita
+  // enviar no meio da composição de um IME (ex.: candidatos de japonês).
+  const isTouchPrimary = window.matchMedia('(pointer: coarse)').matches;
+  textInput.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' || e.isComposing || e.keyCode === 229) return;
+    if (isTouchPrimary || e.shiftKey) return;
+    e.preventDefault();
+    composer.requestSubmit();
+  });
+
   const sendBtn = composer.querySelector('.send-btn');
+  // No iOS, tocar em qualquer botão tira o foco do textarea antes do
+  // evento de submit rodar, fechando o teclado a cada envio. preventDefault
+  // no mousedown evita essa troca de foco (o click/submit continua normal),
+  // então o teclado só fecha quando o usuário realmente toca fora.
+  sendBtn.addEventListener('mousedown', (e) => e.preventDefault());
   function updateSendBtnState() {
     sendBtn.classList.toggle('is-empty', !textInput.value.trim());
   }
-  textInput.addEventListener('input', updateSendBtnState);
-  updateSendBtnState();
-
-  attachBtn.addEventListener('click', () => fileInput.click());
-
-  // "Visualização única" toggle: arms the NEXT attachment (or batch of
-  // attachments) to be sent as view-once media. Resets itself after each
-  // send rather than staying on indefinitely, so it can't be left armed by
-  // accident for some unrelated later photo.
-  let ephemeralArmed = false;
-  function setEphemeralArmed(v) {
-    ephemeralArmed = v;
-    ephemeralToggleBtn.classList.toggle('is-armed', v);
-    ephemeralToggleBtn.setAttribute('aria-pressed', String(v));
-    ephemeralToggleBtn.title = v
-      ? 'Visualização única ativada — a próxima foto/vídeo expira 10s depois de aberta'
-      : 'Ativar visualização única (mídia expira 10s depois de aberta)';
+  function autoResizeTextInput() {
+    textInput.style.height = 'auto';
+    textInput.style.height = `${textInput.scrollHeight}px`;
   }
-  ephemeralToggleBtn.addEventListener('click', () => setEphemeralArmed(!ephemeralArmed));
+  function syncTextInputUI() {
+    updateSendBtnState();
+    autoResizeTextInput();
+  }
+  textInput.addEventListener('input', syncTextInputUI);
+  syncTextInputUI();
+
+  // Miolo comum aos dois menus flutuantes do composer (câmera e "+"):
+  // posiciona acima do botão que abriu, travado nas bordas da viewport
+  // visível (teclado incluído), e fecha por Escape ou clique no backdrop.
+  // `onShow` existe só pra fechar o OUTRO menu - os dois nunca ficam
+  // abertos ao mesmo tempo, senão iam se sobrepor.
+  function makeFloatingMenu(menu, backdrop, btn, onShow) {
+    let open = false;
+
+    function onKey(e) {
+      if (e.key === 'Escape') close();
+    }
+
+    // Recomputa a posição em cima do botão. Chamada de novo (não só no
+    // show()) enquanto o menu está aberto porque o botão "+" mora no
+    // composer, que sobe junto com --app-height quando o teclado do iOS
+    // abre (ver syncViewportHeight) - sem reposicionar, o menu ficava
+    // travado nas coordenadas de antes do teclado e o #name-input (o único
+    // campo digitável que vive aqui) acabava escondido atrás do teclado.
+    function reposition() {
+      const rect = btn.getBoundingClientRect();
+      const mw = menu.offsetWidth;
+      const mh = menu.offsetHeight;
+      const vv = window.visualViewport;
+      const vw = (vv && vv.width) || window.innerWidth;
+      const vh = (vv && vv.height) || window.innerHeight;
+      const offX = vv ? vv.offsetLeft : 0;
+      const offY = vv ? vv.offsetTop : 0;
+      const pad = 8;
+
+      let x = rect.right - mw;
+      let y = rect.top - mh - 4;
+      x = Math.max(offX + pad, Math.min(x, offX + vw - mw - pad));
+      y = Math.max(offY + pad, Math.min(y, offY + vh - mh - pad));
+
+      menu.style.left = `${x}px`;
+      menu.style.top = `${y}px`;
+    }
+
+    function show() {
+      if (open) return;
+      onShow();
+      open = true;
+      btn.setAttribute('aria-expanded', 'true');
+      backdrop.classList.remove('hidden');
+      menu.classList.remove('hidden');
+      reposition();
+      menu.classList.add('is-in');
+      document.addEventListener('keydown', onKey);
+      if (window.visualViewport) {
+        window.visualViewport.addEventListener('resize', reposition);
+        // Mesmo motivo do listener de 'scroll' em syncViewportHeight: no
+        // iOS focar o #name-input às vezes dispara 'scroll' na
+        // visualViewport em vez de (ou além de) 'resize'.
+        window.visualViewport.addEventListener('scroll', reposition);
+      }
+    }
+
+    function close() {
+      if (!open) return;
+      open = false;
+      btn.setAttribute('aria-expanded', 'false');
+      menu.classList.add('hidden');
+      menu.classList.remove('is-in');
+      backdrop.classList.add('hidden');
+      document.removeEventListener('keydown', onKey);
+      if (window.visualViewport) {
+        window.visualViewport.removeEventListener('resize', reposition);
+        window.visualViewport.removeEventListener('scroll', reposition);
+      }
+    }
+
+    btn.addEventListener('click', () => (open ? close() : show()));
+    backdrop.addEventListener('click', close);
+
+    return { open: show, close, isOpen: () => open };
+  }
+
+  const cameraMenuCtl = makeFloatingMenu(cameraMenu, cameraMenuBackdrop, cameraBtn, () => plusMenuCtl.close());
+  const plusMenuCtl = makeFloatingMenu(plusMenu, plusMenuBackdrop, plusBtn, () => cameraMenuCtl.close());
+
+  // A opção do menu de câmera decide sozinha, no momento do clique, se
+  // aquela foto/vídeo é visualização única - não é um estado que fica
+  // ligado/desligado por aí, então não tem como "esquecer armado" de um
+  // envio pro próximo. Mesma ideia pro anexo da galeria, com sua própria
+  // flag (fileInput e cameraInput são inputs diferentes).
+  let pendingCameraEphemeral = false;
+  let pendingAttachEphemeral = false;
+
+  cameraMenuNormalBtn.addEventListener('click', () => {
+    cameraMenuCtl.close();
+    pendingCameraEphemeral = false;
+    cameraInput.click();
+  });
+  cameraMenuEphemeralBtn.addEventListener('click', () => {
+    cameraMenuCtl.close();
+    pendingCameraEphemeral = true;
+    cameraInput.click();
+  });
+  cameraMenuAttachBtn.addEventListener('click', () => {
+    cameraMenuCtl.close();
+    pendingAttachEphemeral = false;
+    fileInput.click();
+  });
+  cameraMenuAttachEphemeralBtn.addEventListener('click', () => {
+    cameraMenuCtl.close();
+    pendingAttachEphemeral = true;
+    fileInput.click();
+  });
+
+  // Foca o campo de nome pras rotas que precisam de um myName() não-vazio
+  // (enviar mensagem, apagar, reagir, anexar) - o campo mora dentro do
+  // menu "+" agora, então precisa abrir o menu primeiro ou o focus() não
+  // teria nada visível pra mostrar.
+  function focusNameInput() {
+    plusMenuCtl.open();
+    nameInput.focus();
+  }
 
   // Reads the intrinsic width/height of an image or video File BEFORE it's
   // uploaded (decoding it locally via a throwaway object URL - never
@@ -2419,18 +2835,17 @@
     });
   }
 
-  fileInput.addEventListener('change', async () => {
-    const files = Array.from(fileInput.files || []);
-    fileInput.value = '';
+  // Miolo comum aos dois inputs de arquivo (galeria via fileInput, câmera
+  // via cameraInput) - cada um só decide de onde vêm os File objects e se
+  // esse lote é visualização única antes de chamar isto.
+  async function uploadFiles(files, wantsEphemeral) {
     if (!files.length) return;
     const sender = myName();
     if (!sender) {
-      nameInput.focus();
+      focusNameInput();
       return;
     }
 
-    const wantsEphemeral = ephemeralArmed;
-    setEphemeralArmed(false);
     if (wantsEphemeral && files.some((f) => !f.type.startsWith('image/') && !f.type.startsWith('video/'))) {
       toast('Áudio e arquivos são enviados normalmente — visualização única vale só para foto/vídeo.');
     }
@@ -2481,6 +2896,22 @@
     } else {
       uploadProgress.classList.add('hidden');
     }
+  }
+
+  fileInput.addEventListener('change', () => {
+    const files = Array.from(fileInput.files || []);
+    fileInput.value = '';
+    const wantsEphemeral = pendingAttachEphemeral;
+    pendingAttachEphemeral = false;
+    uploadFiles(files, wantsEphemeral);
+  });
+
+  cameraInput.addEventListener('change', () => {
+    const files = Array.from(cameraInput.files || []);
+    cameraInput.value = '';
+    const wantsEphemeral = pendingCameraEphemeral;
+    pendingCameraEphemeral = false;
+    uploadFiles(files, wantsEphemeral);
   });
 
   exportBtn.addEventListener('click', () => {
