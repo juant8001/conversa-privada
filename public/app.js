@@ -4574,9 +4574,11 @@
     if (entries.some((en) => en.isIntersecting)) loadStickerPage();
   }, { root: stickerScroll, rootMargin: '300px 0px' }).observe(stickerSentinel);
 
-  // Favoritas do WhatsApp do Mac: abre uma tela com todas as que dá pra
-  // trazer, a pessoa marca as que quer e importa. Uma vez só - depois o
-  // servidor grava que já foi e o botão some pros dois.
+  // Favoritas do WhatsApp do Mac: abre uma tela com as que dá pra trazer e
+  // ainda não estão na coleção; a pessoa marca as que quer e importa. Pode
+  // voltar quando quiser. As que o Mac não consegue baixar (link expirado)
+  // aparecem depois que a pessoa manda a figurinha do celular pra qualquer
+  // conversa - aí é tocar em Atualizar.
   const waPanel = document.getElementById('wa-panel');
   const waBack = document.getElementById('wa-back');
   const waGrid = document.getElementById('wa-grid');
@@ -4586,7 +4588,8 @@
   const waEmptyText = document.getElementById('wa-empty-text');
   const waSelectAll = document.getElementById('wa-select-all');
   const waImport = document.getElementById('wa-import');
-  let waItems = [];               // [{ key, inLibrary }]
+  const waRefresh = document.getElementById('wa-refresh');
+  let waItems = [];               // [{ key, inLibrary }] - só as que faltam na coleção
   const waSelected = new Set();   // keys marcadas
   let waLoadSeq = 0;
   let waImportBusy = false;
@@ -4596,7 +4599,7 @@
   }
 
   function waSelectable() {
-    return waItems.filter((it) => !it.inLibrary);
+    return waItems;
   }
 
   function syncWaFooter() {
@@ -4608,6 +4611,7 @@
     }
     const selectable = waSelectable();
     waSelectAll.classList.toggle('hidden', selectable.length === 0);
+    waRefresh.disabled = waImportBusy;
     waSelectAll.textContent = selectable.length && selectable.every((it) => waSelected.has(it.key))
       ? 'Nenhuma' : 'Todas';
   }
@@ -4644,6 +4648,11 @@
       return;
     }
     waPanel.classList.remove('hidden');
+    loadWaFavorites();
+  }
+
+  async function loadWaFavorites() {
+    if (waImportBusy) return;
     waItems = [];
     waSelected.clear();
     waGrid.replaceChildren();
@@ -4656,23 +4665,24 @@
       const res = await fetch(api('/api/stickers/whatsapp-favorites'));
       const data = await res.json().catch(() => ({}));
       if (seq !== waLoadSeq) return;
-      if (!res.ok) {
-        if (data.error === 'done') {
-          waImportEnabled = false;
-          syncStickerHeader();
-        }
-        throw new Error(data.message || 'Não consegui ler as favoritas do WhatsApp.');
-      }
-      waItems = Array.isArray(data.items) ? data.items : [];
+      if (!res.ok) throw new Error(data.message || 'Não consegui ler as favoritas do WhatsApp.');
+      const all = Array.isArray(data.items) ? data.items : [];
+      waItems = all.filter((it) => !it.inLibrary);
+      const inLib = all.length - waItems.length;
       const notes = [];
-      notes.push(waItems.length === 1 ? '1 favorita pode ser importada.' : `${waItems.length} favoritas podem ser importadas.`);
+      if (waItems.length) {
+        notes.push(waItems.length === 1 ? '1 favorita pra escolher.' : `${waItems.length} favoritas pra escolher.`);
+      }
+      if (inLib) notes.push(inLib === 1 ? '1 já está na coleção.' : `${inLib} já estão na coleção.`);
       if (data.missing) {
-        notes.push(`${data.missing} ${data.missing === 1 ? 'não aparece porque o WhatsApp deste Mac nunca baixou o arquivo' : 'não aparecem porque o WhatsApp deste Mac nunca baixou os arquivos'}. Se quiser ${data.missing === 1 ? 'ela' : 'elas'}, abra as figurinhas favoritas no WhatsApp do Mac e role até o fim antes de importar.`);
+        notes.push(`${data.missing} ${data.missing === 1 ? 'ficou só no celular: o link dela no WhatsApp expirou e o Mac não consegue baixar' : 'ficaram só no celular: os links delas no WhatsApp expiraram e o Mac não consegue baixar'}. Pra trazer, mande pelo WhatsApp do celular as que você quiser pra qualquer conversa (um grupo só seu serve) e toque em Atualizar.`);
       }
       waNote.textContent = notes.join(' ');
-      waNote.classList.remove('hidden');
+      waNote.classList.toggle('hidden', !notes.length);
       if (!waItems.length) {
-        waEmptyText.textContent = 'Nenhuma favorita com arquivo neste Mac.';
+        waEmptyText.textContent = all.length
+          ? 'Todas as favoritas que estão no Mac já estão na coleção.'
+          : 'Nenhuma favorita com arquivo neste Mac.';
         waEmpty.classList.remove('hidden');
       }
       renderWaGrid();
@@ -4715,7 +4725,7 @@
     if (waImportBusy || waSelected.size === 0) return;
     const n = waSelected.size;
     const ok = await askConfirm(
-      `Importar ${n === 1 ? 'a figurinha escolhida' : `as ${n} figurinhas escolhidas`}? A importação do WhatsApp só pode ser feita uma vez: depois disso o botão some.`,
+      `Importar ${n === 1 ? 'a figurinha escolhida' : `as ${n} figurinhas escolhidas`} pra coleção?`,
       'Importar',
     );
     if (!ok) return;
@@ -4734,7 +4744,7 @@
         const res = await fetch(api('/api/stickers/import-whatsapp'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ sender: myName(), keys: batch, final: i + 25 >= keys.length }),
+          body: JSON.stringify({ sender: myName(), keys: batch }),
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) {
@@ -4755,8 +4765,6 @@
       toast(error);
       return;
     }
-    waImportEnabled = false;
-    syncStickerHeader();
     refreshLibrary();
     closeWaPanel();
     let msg = added === 1 ? '1 figurinha importada do WhatsApp.' : `${added} figurinhas importadas do WhatsApp.`;
@@ -4767,6 +4775,7 @@
   });
 
   waBack.addEventListener('click', closeWaPanel);
+  waRefresh.addEventListener('click', loadWaFavorites);
   waImportBtn.addEventListener('click', () => {
     if (isTouchPrimary) closeTray();
     openWaPanel();

@@ -216,7 +216,7 @@
   </div>
 </div>
 
-<!-- Escolher as favoritas do WhatsApp antes de importar (uma vez só).
+<!-- Escolher as favoritas do WhatsApp que ainda não estão na coleção.
      Mesmo esqueleto dos painéis de Mídia e Favoritas. -->
 <div id="wa-panel" class="media-panel hidden">
   <header class="chat-header">
@@ -224,6 +224,7 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 5.5 8 12l6.5 6.5"/></svg>
     </button>
     <span class="title">Favoritas do WhatsApp</span>
+    <button type="button" id="wa-refresh" class="wa-select-all">Atualizar</button>
     <button type="button" id="wa-select-all" class="wa-select-all hidden">Todas</button>
   </header>
   <div id="wa-scroll" class="media-scroll">
@@ -236,7 +237,7 @@
     <div id="wa-empty" class="center-state hidden"><p id="wa-empty-text"></p></div>
   </div>
   <footer class="wa-footer">
-    <p class="wa-once">A importação acontece uma vez só. Depois disso o botão some.</p>
+    <p class="wa-once">Só aparecem as que ainda não estão na coleção. Dá pra voltar aqui quando quiser.</p>
     <button type="button" id="wa-import" class="wa-import" disabled>Escolha as figurinhas</button>
   </footer>
 </div>

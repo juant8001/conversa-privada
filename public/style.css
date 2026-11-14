@@ -2613,3 +2613,4 @@ body::before {
   text-shadow: 0 1px 3px rgba(0, 0, 0, 0.8);
   pointer-events: none;
 }
+.wa-select-all:disabled { opacity: 0.5; cursor: default; }

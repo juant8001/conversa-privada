@@ -53,6 +53,11 @@ function waEncrypt(plain, mediaKey) {
 }
 const WA_KEY_BLUE = crypto.randomBytes(32);
 const WA_ENC_BLUE = waEncrypt(WEBP_BLUE, WA_KEY_BLUE);
+// A favorita "perdida" chegando de novo numa conversa (mandada do celular):
+// a mensagem traz link novo e chave própria.
+const WA_SUMIU = Buffer.from('sumiu');
+const WA_KEY_MSG = crypto.randomBytes(32);
+const WA_ENC_MSG = waEncrypt(WA_SUMIU, WA_KEY_MSG);
 
 function pbVarint(n) {
   const out = [];
@@ -104,7 +109,23 @@ function makeFakeWhatsApp(mediaOrigin) {
     input: `create table ZWACDSTICKER (Z_PK integer primary key, ZFILEHASH varchar, ZRELATIVEIMAGEPATH varchar);
 insert into ZWACDSTICKER (ZFILEHASH, ZRELATIVEIMAGEPATH) values ('${b64sha(WEBP_RED)}', 'no-sticker-pack/red.webp');`,
   });
+  // Conversas: a vermelha já passou por uma (arquivo apagado, link morto).
+  execFileSync('sqlite3', [path.join(dir, 'ChatStorage.sqlite')], {
+    input: `create table ZWAMESSAGE (Z_PK integer primary key, ZMESSAGETYPE integer);
+create table ZWAMEDIAITEM (Z_PK integer primary key, ZMESSAGE integer, ZVCARDNAME varchar, ZMEDIALOCALPATH varchar, ZMEDIAURL varchar, ZMEDIAKEY blob, ZMEDIAURLDATE timestamp);
+insert into ZWAMESSAGE values (1, 15);
+insert into ZWAMEDIAITEM values (1, 1, '${b64sha(WEBP_RED)}', 'Media/x/apagado.webp', '${mediaOrigin}/wa/morto', X'${crypto.randomBytes(32).toString('hex')}', 10);
+insert into ZWAMESSAGE values (2, 0);`,
+  });
   return dir;
+}
+
+// Simula o Juan mandando a figurinha "perdida" do celular pra uma conversa.
+function waReceiveFromPhone(dir, mediaOrigin) {
+  execFileSync('sqlite3', [path.join(dir, 'ChatStorage.sqlite')], {
+    input: `insert into ZWAMESSAGE values (3, 15);
+insert into ZWAMEDIAITEM values (2, 3, '${b64sha(WA_SUMIU)}', null, '${mediaOrigin}/wa/msg/sumiu', X'${WA_KEY_MSG.toString('hex')}', 20);`,
+  });
 }
 
 function hasBin(name) {
@@ -146,6 +167,8 @@ function startFakeGiphy() {
         }
       } else if (req.url === '/wa/v/blue') {
         res.end(WA_ENC_BLUE);
+      } else if (req.url === '/wa/msg/sumiu') {
+        res.end(WA_ENC_MSG);
       } else {
         res.statusCode = 404;
         res.end();
@@ -493,28 +516,33 @@ async function main() {
       r = await juan('POST', '/api/stickers/import-whatsapp', { sender: 'Juan', keys: 'tudo' });
       check('importar sem lista de escolhidas = 400', r.res.status === 400);
       r = await juan('POST', '/api/stickers/import-whatsapp', { sender: 'Juan', keys: [blueKey, 'f'.repeat(64)] });
-      check('importa só a escolhida (lote do meio)', r.res.status === 200 && r.json.added === 1 && r.json.missing === 1 && r.json.done === false, r.json);
+      check('importa só a escolhida', r.res.status === 200 && r.json.added === 1 && r.json.missing === 1, r.json);
       r = await juan('GET', '/api/stickers/whatsapp-favorites');
       check('lista marca a que já entrou', r.json.items.find((it) => it.key === blueKey).inLibrary === true
         && r.json.items.find((it) => it.key === redKey).inLibrary === false, r.json);
-      r = await juan('POST', '/api/stickers/import-whatsapp', { sender: 'Juan', keys: [], final: true });
-      check('último lote fecha a importação', r.res.status === 200 && r.json.done === true, r.json);
+      r = await juan('POST', '/api/stickers/import-whatsapp', { sender: 'Juan', keys: [blueKey] });
+      check('importar de novo a mesma conta como repetida', r.res.status === 200 && r.json.added === 0 && r.json.duplicates === 1, r.json);
       r = await juan('GET', '/api/stickers');
-      check('só a escolhida entrou; botão some', r.json.waImport === false
+      check('só a escolhida entrou; botão continua', r.json.waImport === true
         && r.json.stickers.filter((st) => st.width === 2).length === 1, r.json.waImport);
       r = await teo('GET', '/api/boot?name=Teo');
-      check('…pros dois', r.json.waImport === false);
-      r = await juan('GET', '/api/stickers/whatsapp-favorites');
-      check('depois de importar, a lista fecha', r.res.status === 410);
-      r = await juan('POST', '/api/stickers/import-whatsapp', { sender: 'Juan', keys: [redKey], final: true });
-      check('…e importar de novo é recusado', r.res.status === 409);
+      check('…pros dois', r.json.waImport === true);
       r = await juan('GET', `/api/stickers/whatsapp-favorites/${redKey}`, undefined, { raw: true });
-      check('…e as prévias também fecham', r.res.status === 404);
+      check('prévia da que falta continua aberta', r.res.status === 200 && r.buf.equals(WEBP_RED));
+      r = await juan('POST', '/api/stickers/import-whatsapp', { sender: 'Juan', keys: [redKey] });
+      check('dá pra voltar e importar outra depois', r.res.status === 200 && r.json.added === 1, r.json);
+      r = await juan('GET', '/api/stickers/whatsapp-favorites');
+      check('…e as duas aparecem como já na coleção', r.json.items.every((it) => it.inLibrary === true) && r.json.missing === 1, r.json);
+      waReceiveFromPhone(waDir, fakeOrigin);
+      r = await juan('GET', '/api/stickers/whatsapp-favorites');
+      const sumiuKey = crypto.createHash('sha256').update(WA_SUMIU).digest('hex');
+      check('a perdida aparece depois de chegar numa conversa (link da mensagem)', r.json.missing === 0
+        && r.json.items.length === 3 && r.json.items[2].key === sumiuKey && r.json.items[2].inLibrary === false, r.json);
       r = await anon('POST', '/api/stickers/import-whatsapp', { sender: 'x', keys: [] });
       check('importar exige sessão', r.res.status === 401);
       await juan('POST', '/api/clear');
       r = await juan('GET', '/api/boot?name=Juan');
-      check('limpar a conversa não reabre a importação', r.json.waImport === false && r.json.stickers.length > 0);
+      check('limpar a conversa mantém a coleção e o botão', r.json.waImport === true && r.json.stickers.length > 0);
     } else {
       console.log('      (sem sqlite3: pulando as favoritas do WhatsApp)');
     }
