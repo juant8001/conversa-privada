@@ -22,14 +22,21 @@ Portuguese too.
 - `scripts/uninstall.sh` — unloads both `launchd` agents. Does **not** touch
   `data/`.
 
-There is **no test suite, linter, or build step** despite some code comments
-referencing "tests" (e.g. the `EPHEMERAL_TTL_MS` env override exists for tests
-that were never committed). To iterate locally, run `npm start` with a hand-made
-`.env` and hit `http://127.0.0.1:4177/c/<slug>`.
+- `npm test` — `node test/smoke.js`: spawns the real `server.js` on a random
+  port with a throw-away `DATA_DIR` (plus a fake GIPHY server) and exercises
+  the API over `fetch`. No dependencies, never touches the real `.env`/`data/`.
+  It covers the server only — there is no committed browser test, linter or
+  build step. To iterate on the UI, run `npm start` with a hand-made `.env`
+  and hit `http://127.0.0.1:4177/c/<slug>`.
 
 Useful env vars: `PORT`, `ROOM_SLUG`, `DATA_DIR`, `MAX_UPLOAD_MB` (default 300),
 `EPHEMERAL_TTL_MS` (default 10000), `COOKIE_INSECURE=1` (drop `Secure` flag so
 cookies work over plain-HTTP localhost).
+
+Optional features, each **off unless its variable is set** (the repo is public,
+so none of these values may ever be hardcoded): `HERMES_TRIGGER`
+(+ `HERMES_BIN`) for the Hermes portal, `GIPHY_API_KEY` (+ `GIPHY_RATING`,
+default `r`) for GIF search.
 
 ## Architecture
 
@@ -72,7 +79,8 @@ exists in memory during the moment someone logs in.
 
 - `GET /api/stream` is a Server-Sent Events endpoint. A single Node
   `EventEmitter` (`bus`) fans out events: `message`, `message-updated`,
-  `message-deleted`, `message-viewed`, `cleared`, `presence` / `presence-init`.
+  `message-deleted`, `message-viewed`, `message-reacted`, `message-starred`,
+  `stickers-changed`, `typing`, `cleared`, `presence` / `presence-init`.
 - **Presence** (`onlineConnections` Map) and **ephemeral expiry timers**
   (`pendingExpiry` Map) are in-memory only, same "wiped on restart" philosophy as
   sessions.
@@ -219,14 +227,6 @@ panel; and `.media-tile` needs `-webkit-touch-callout: none` (like
 `.bubble img` already had) or iOS pops the native "Salvar imagem" sheet over
 our menu.
 
-### Decoy / trap password
-
-`DECOY_CODE` (hardcoded in `server.js`) makes `/api/login` return
-`{ ok: true, decoy: true }` — no session, no rate-limit hit, no failure log, no
-contact with the store. The frontend then shows a fake "tool under development"
-screen (`#decoy-screen`). Purpose: someone who shouldn't be poking around but
-knows/guesses this specific code sees nothing that reveals a real chat exists.
-
 ### Rate limiting
 
 `lib/auth.js`: 6 wrong codes from an IP → 10-minute lock (`isLocked` /
@@ -259,3 +259,55 @@ calls `rerenderLoadedMessages()` so existing bubbles switch sides. The
 view-once permission check deliberately spells out
 `sameName(m.sender, myName())` instead of reusing the presentational `mine`
 flag.
+
+## Security headers and user-uploaded files
+
+- A top-level middleware sets a strict CSP on every response (`PAGE_CSP`:
+  only our own `app.js`/`style.css`, `connect-src 'self'`, no inline script or
+  `<style>`), `Referrer-Policy: no-referrer` (the secret room URL never leaks
+  in a Referer), `X-Frame-Options`, `nosniff`. `style-src` has no
+  `'unsafe-inline'`: set styles through `el.style.x = ...` (CSSOM, allowed),
+  never through a `style="..."` attribute or an injected `<style>`.
+  `img-src` allows `https:` only because of link-preview images.
+- `GET /api/media/:id` serves user uploads with `MEDIA_CSP` (`sandbox`, no
+  script) and forces `Content-Disposition: attachment` for anything that is
+  not image/video/audio (and for SVG). An uploaded `.html`/`.svg` must never
+  run as a page inside the chat's origin — it would have the viewer's session.
+- Every `/api/*` response is `Cache-Control: no-store`.
+- `index.html`/`app.js`/`style.css` are served by `sendStatic` (brotli/gzip,
+  ETag, `no-cache`), compressed once and cached in memory until the file's
+  mtime changes.
+- `getMediaIndex` caches "blob id → mime/filename" for the media route, keyed
+  on `store.enc`'s inode+mtime+size, so a grid of thumbnails doesn't decrypt
+  and parse the whole conversation once per image. It holds no message text.
+
+## Favoritas, reações, coleção (v44)
+
+- **Favoritas**: `msg.starredBy` (array of names) — per person, never shown to
+  the other side. `POST /api/messages/:id/star`, `GET /api/starred?name=`.
+  Client: `.msg-row.is-starred` (star next to the time) and `#fav-panel`.
+  Deleted and view-once messages can't be starred.
+- **Reações**: any single emoji (`isSingleEmoji` on both sides). The six
+  shortcuts in the context menu are per person, stored in `data.prefs` under
+  `prefsKey(name)` (`POST /api/prefs`, returned by `GET /api/boot`) and
+  mirrored in `localStorage`.
+- **Coleção de figurinhas e GIFs**: `data.stickers`, one shared library.
+  Sending an item creates a message that **points at the same blob** (no
+  copy), so every delete path goes through `mediaStillReferenced` /
+  `releaseMessageMedia` — a blob is unlinked only when no message and no
+  library item references it. "Limpar conversa" keeps the library and prefs
+  (`store.clearAll(key, preserved, keepMediaIds)`). Stickers are resized
+  client-side to 512px (`imageToSticker`); message type is `sticker`, a GIF is
+  an `image` message with `gif: true`.
+- **GIF search** (`/api/gifs/*`, only with `GIPHY_API_KEY`): search, previews
+  and the download of the chosen GIF all go through the server — the browser
+  never talks to GIPHY (and the CSP wouldn't let it). `isAllowedGifUrl` pins
+  every fetch to `*.giphy.com`.
+- **Formatação**: `renderRich` in `app.js` (`*b*`/`**b**`, `_i_`, `~s~`/`~~s~~`,
+  `` `code` ``, ```` ``` ````). Messages are stored and copied as raw text; the
+  formatting is applied only when drawing, with DOM nodes (never `innerHTML`).
+  Markers inside a URL are ignored. `stripTrailingPunctuation` (client) and
+  `stripTrailingPunctuationServer` must keep the same character list.
+- **Bandeja** (`#tray`): emoji / figurinhas / GIFs, in the page flow under the
+  composer (not floating), so `#messages` shrinks by itself. Grids stay
+  mounted while closed for the same `no-store` reason as the media tab.

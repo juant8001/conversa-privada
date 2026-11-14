@@ -36,7 +36,7 @@
 
   const loginScreen = document.getElementById('login-screen');
   const chatScreen = document.getElementById('chat-screen');
-  const decoyScreen = document.getElementById('decoy-screen');
+  const noticeScreen = document.getElementById('notice-screen');
   const nameScreen = document.getElementById('name-screen');
   const nameForm = document.getElementById('name-form');
   const nameScreenInput = document.getElementById('name-screen-input');
@@ -54,6 +54,10 @@
   const plusMenu = document.getElementById('plus-menu');
   const plusMenuBackdrop = document.getElementById('plus-menu-backdrop');
   const cameraBtn = document.getElementById('camera-btn');
+  const textInputWrap = document.getElementById('text-input-wrap');
+  const recordCancelBtn = document.getElementById('record-cancel-btn');
+  const recordBar = document.getElementById('record-bar');
+  const recordTimerEl = document.getElementById('record-timer');
   const cameraMenu = document.getElementById('camera-menu');
   const cameraMenuBackdrop = document.getElementById('camera-menu-backdrop');
   const cameraMenuNormalBtn = document.getElementById('camera-menu-normal');
@@ -106,11 +110,69 @@
   const msgMenuSelectBtn = document.getElementById('msg-menu-select');
   const msgMenuDelBtn = document.getElementById('msg-menu-delete');
   const msgMenuReactions = document.getElementById('msg-menu-reactions');
-  const reactionPicks = msgMenu.querySelectorAll('.reaction-pick');
+  const msgMenuStarBtn = document.getElementById('msg-menu-star');
+  const msgMenuStarLabel = document.getElementById('msg-menu-star-label');
+  const msgMenuStickerBtn = document.getElementById('msg-menu-sticker');
+  const msgMenuStickerLabel = document.getElementById('msg-menu-sticker-label');
+  const msgMenuRemoveBtn = document.getElementById('msg-menu-remove');
+  const reactionPicksEl = document.getElementById('reaction-picks');
+  const reactionMoreBtn = document.getElementById('reaction-more');
 
-  // Conjunto fixo de reações. Mantém em sincronia com REACTION_EMOJIS em
-  // server.js (o servidor rejeita qualquer emoji fora dessa lista).
-  const REACTION_EMOJIS = ['❤️', '👍', '😂', '😮', '😢', '🔥'];
+  // Atalhos de reação: os 6 emojis da barra do menu de contexto. Cada pessoa
+  // escolhe os seus (folha de emojis → "Editar atalhos"); o servidor guarda
+  // por nome (POST /api/prefs) pra valer em todos os aparelhos, e o
+  // localStorage é só um espelho pra barra já abrir certa antes do /api/boot
+  // responder. Padrão em sincronia com DEFAULT_QUICK_REACTIONS em server.js.
+  const DEFAULT_QUICK_REACTIONS = ['❤️', '👍', '😂', '😮', '😢', '🔥'];
+  const QUICK_REACTIONS_KEY = 'private-chat:quick-reactions';
+
+  // Um emoji só (um grafema), nunca texto - mesma regra que o servidor aplica
+  // em /react e /prefs (ver isSingleEmoji em server.js).
+  //
+  // As regex com \p{...} são montadas com new RegExp dentro de um try, e não
+  // escritas como literais: um navegador antigo que não conheça alguma dessas
+  // propriedades Unicode recusaria o ARQUIVO INTEIRO na hora de interpretar
+  // (erro de sintaxe) e o chat não abriria. Assim, no pior caso, cai numa
+  // versão mais simples da mesma checagem.
+  function safeRegExp(source, flags, fallback) {
+    try {
+      return new RegExp(source, flags);
+    } catch (e) {
+      return fallback;
+    }
+  }
+  const EMOJI_RE = safeRegExp(
+    '^(?:\\p{Extended_Pictographic}|\\p{Regional_Indicator}{2}|[#*0-9]\\uFE0F?\\u20E3)'
+      + '(?:\\uFE0F|\\u200D|\\p{Extended_Pictographic}|\\p{Emoji_Modifier}|[\\u{E0020}-\\u{E007F}])*$',
+    'u',
+    // Sem suporte: qualquer coisa curta que não tenha letra, número ou
+    // espaço comum. O servidor valida de verdade de qualquer jeito.
+    /^[^\sA-Za-z0-9<>&"']{1,16}$/,
+  );
+  const graphemeSegmenter = (window.Intl && Intl.Segmenter)
+    ? new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+    : null;
+  function graphemes(str) {
+    if (graphemeSegmenter) return Array.from(graphemeSegmenter.segment(str), (g) => g.segment);
+    return Array.from(str);
+  }
+  function isSingleEmoji(value) {
+    return typeof value === 'string' && !!value && value.length <= 32
+      && EMOJI_RE.test(value) && graphemes(value).length === 1;
+  }
+
+  function validQuickReactions(list) {
+    return Array.isArray(list) && list.length === DEFAULT_QUICK_REACTIONS.length
+      && list.every(isSingleEmoji) && new Set(list).size === list.length;
+  }
+  function loadLocalQuickReactions() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(QUICK_REACTIONS_KEY) || 'null');
+      if (validQuickReactions(parsed)) return parsed;
+    } catch (e) { /* cai no padrão */ }
+    return DEFAULT_QUICK_REACTIONS.slice();
+  }
+  let quickReactions = loadLocalQuickReactions();
 
   // The access code field is masked via -webkit-text-security instead of
   // type="password" (see style.css for why: it's the one lever left
@@ -166,10 +228,16 @@
     return NAME_COLORS[hash % NAME_COLORS.length];
   }
 
+  // GIF enviado antes da marca `gif` existir só tem o mimeType pra dizer.
+  function isGifMessage(m) {
+    return m.type === 'image' && (!!m.gif || m.mimeType === 'image/gif');
+  }
+
   function snippetFor(m) {
     if (m.deleted) return `Mensagem apagada por ${m.deletedBy || m.sender}`;
     if (m.type === 'text') return m.text.length > 140 ? `${m.text.slice(0, 140)}...` : m.text;
-    const labels = { image: '📷 Foto', video: '🎥 Video', audio: '🎤 Audio', file: '📄 Arquivo' };
+    if (isGifMessage(m)) return 'GIF';
+    const labels = { image: '📷 Foto', video: '🎥 Video', audio: '🎤 Audio', file: '📄 Arquivo', sticker: 'Figurinha' };
     return labels[m.type] || 'Arquivo';
   }
 
@@ -182,13 +250,15 @@
     if (m.ephemeral) return undefined;
     if (m.type === 'image') return m.thumbId || m.mediaId;
     if (m.type === 'video') return m.thumbId;
+    if (m.type === 'sticker') return m.mediaId;
     return undefined;
   }
   function setReplyingTo(m) {
     replyingTo = { id: m.id, sender: m.sender, snippet: snippetFor(m) };
     replyBarSender.textContent = m.sender;
     replyBarSender.style.color = nameColor(m.sender);
-    replyBarSnippet.textContent = replyingTo.snippet;
+    replyBarSnippet.replaceChildren();
+    renderRich(replyBarSnippet, replyingTo.snippet, { links: false });
     const thumbId = replyThumbId(m);
     if (thumbId) {
       replyBarThumb.src = api(`/api/media/${thumbId}`);
@@ -367,7 +437,7 @@
   const LONG_PRESS_MOVE_TOL = 10; // px de folga antes de virar "isso é scroll"
 
   let activeMenuMsgId = null;
-  let activeMenuMode = 'chat';      // 'chat' | 'media'
+  let activeMenuMode = 'chat';      // 'chat' | 'media' | 'library'
   let activeMenuScrollEl = null;    // qual scroller fecha o menu ao rolar
 
   function onMenuKey(e) {
@@ -389,14 +459,24 @@
     msgMenuReplyBtn.classList.remove('hidden');
     msgMenuDelBtn.classList.remove('hidden');
     msgMenuReactions.classList.remove('hidden');
+    msgMenuRemoveBtn.classList.add('hidden'); // só existe no menu da bandeja
 
-    // Barra de reação: destaca o emoji com que EU já reagi (se reagi). Fica
-    // visível pra qualquer mensagem não apagada - openMessageMenu já saiu
-    // acima em m.deleted.
+    // Favoritar: qualquer mensagem viva, menos visualização única (que não
+    // pode ganhar um atalho permanente - o servidor recusa também).
+    msgMenuStarBtn.classList.toggle('hidden', !!m.ephemeral);
+    msgMenuStarLabel.textContent = isStarredByMe(m) ? 'Desfavoritar' : 'Favoritar';
+
+    // Guardar na coleção: foto vira figurinha, GIF vai pros GIFs salvos, e
+    // figurinha recebida que não está (mais) na coleção pode voltar pra ela.
+    const stickerAction = collectActionFor(m);
+    msgMenuStickerBtn.classList.toggle('hidden', !stickerAction);
+    if (stickerAction) msgMenuStickerLabel.textContent = stickerAction.label;
+
+    // Barra de reação: os atalhos desta pessoa, com destaque no emoji com
+    // que EU já reagi (se reagi). Fica visível pra qualquer mensagem não
+    // apagada - openMessageMenu já saiu acima em m.deleted.
     const myReaction = (m.reactions || []).find((r) => sameName(r.sender, myName()));
-    reactionPicks.forEach((b) => {
-      b.classList.toggle('is-mine', !!myReaction && b.dataset.emoji === myReaction.emoji);
-    });
+    renderReactionPicks(myReaction && myReaction.emoji);
 
     showMenu(id, 'chat', at, messagesEl);
   }
@@ -414,8 +494,28 @@
     msgMenuSelectBtn.classList.add('hidden');
     msgMenuDelBtn.classList.add('hidden');
     msgMenuReactions.classList.add('hidden');
+    msgMenuStarBtn.classList.add('hidden');
+    msgMenuStickerBtn.classList.add('hidden');
+    msgMenuRemoveBtn.classList.add('hidden');
 
     showMenu(item.id, 'media', at, mediaScroll);
+  }
+
+  // Menu de um item da bandeja (figurinha ou GIF salvo): só "Remover da
+  // coleção". O id aqui é o do item da coleção, não de uma mensagem.
+  function openLibraryMenu(id, at, scrollEl) {
+    if (!id || activeMenuMsgId === id) return;
+    msgMenuGotoBtn.classList.add('hidden');
+    msgMenuReplyBtn.classList.add('hidden');
+    msgMenuCopyBtn.classList.add('hidden');
+    msgMenuSelectBtn.classList.add('hidden');
+    msgMenuDelBtn.classList.add('hidden');
+    msgMenuReactions.classList.add('hidden');
+    msgMenuStarBtn.classList.add('hidden');
+    msgMenuStickerBtn.classList.add('hidden');
+    msgMenuRemoveBtn.classList.remove('hidden');
+
+    showMenu(id, 'library', at, scrollEl);
   }
 
   // Miolo comum aos dois modos: posiciona o cartão dentro da viewport visível
@@ -579,13 +679,48 @@
     if (id) handleDeleteClick(id);
   });
 
-  reactionPicks.forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const id = activeMenuMsgId;
-      const emoji = btn.dataset.emoji;
-      closeMessageMenu();
-      if (id) sendReaction(id, emoji);
-    });
+  msgMenuStarBtn.addEventListener('click', () => {
+    const id = activeMenuMsgId;
+    closeMessageMenu();
+    if (id) toggleStar(id);
+  });
+  msgMenuStickerBtn.addEventListener('click', () => {
+    const m = loadedMessages.find((x) => x.id === activeMenuMsgId);
+    closeMessageMenu();
+    if (m) collectFromMessage(m);
+  });
+  msgMenuRemoveBtn.addEventListener('click', () => {
+    const id = activeMenuMsgId;
+    closeMessageMenu();
+    if (id) removeLibraryItem(id);
+  });
+
+  // (Re)desenha os atalhos da barra de reação. `mine` é o emoji com que eu
+  // já reagi nesta mensagem, se houver.
+  function renderReactionPicks(mine) {
+    reactionPicksEl.replaceChildren();
+    for (const emoji of quickReactions) {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = `reaction-pick${emoji === mine ? ' is-mine' : ''}`;
+      btn.dataset.emoji = emoji;
+      btn.setAttribute('aria-label', `Reagir com ${emoji}`);
+      btn.textContent = emoji;
+      reactionPicksEl.appendChild(btn);
+    }
+  }
+  renderReactionPicks();
+  reactionPicksEl.addEventListener('click', (e) => {
+    const btn = e.target.closest('.reaction-pick');
+    if (!btn) return;
+    const id = activeMenuMsgId;
+    closeMessageMenu();
+    if (id) sendReaction(id, btn.dataset.emoji);
+  });
+  reactionMoreBtn.addEventListener('click', () => {
+    const id = activeMenuMsgId;
+    closeMessageMenu();
+    if (id) openEmojiSheet(id);
   });
 
   // ---- os dois gatilhos ----
@@ -939,7 +1074,12 @@
     const name = nameInput.value.trim();
     const previous = localStorage.getItem(NAME_KEY) || '';
     localStorage.setItem(NAME_KEY, name);
-    if (name !== previous) rerenderLoadedMessages();
+    if (name !== previous) {
+      rerenderLoadedMessages();
+      // Atalhos de reação e favoritas são por nome.
+      loadBoot();
+      resetFavPanel();
+    }
   });
 
   let renderedIds = new Set();
@@ -1071,7 +1211,10 @@
         }
         break;
       }
-      if ('.,!?;:'.includes(last)) {
+      // *_~` entram por causa da formatação (renderRich, logo abaixo): em
+      // "*veja https://exemplo.com*" o asterisco fecha o negrito, não faz
+      // parte do link. Mesma lista de stripTrailingPunctuationServer.
+      if ('.,!?;:*_~`'.includes(last)) {
         trail = last + trail;
         raw = raw.slice(0, -1);
         continue;
@@ -1081,42 +1224,173 @@
     return { raw, trail };
   }
 
-  // Turns any http(s)/www. link inside a text message into a real, clickable
-  // <a> - built entirely with DOM nodes (never innerHTML on user text, which
-  // would be an XSS hole) so this is exactly as safe as the plain
-  // textContent assignment it replaces.
-  function linkify(container, text) {
+  function makeLink(raw) {
+    const a = document.createElement('a');
+    a.className = 'msg-link';
+    a.href = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+    a.textContent = raw;
+    a.target = '_blank';
+    a.rel = 'noopener noreferrer nofollow';
+    // Don't let a tap-to-open-link also trigger the bubble's own click
+    // handling (reply-quote scrolling etc. elsewhere uses bubble clicks).
+    a.addEventListener('click', (e) => e.stopPropagation());
+    return a;
+  }
+
+  // Onde estão os links dentro do texto: pares [início, fim) já sem a
+  // pontuação final.
+  function findUrlRanges(text) {
+    const ranges = [];
     URL_RE.lastIndex = 0;
-    let lastIndex = 0;
     let match;
-    let any = false;
     while ((match = URL_RE.exec(text))) {
-      any = true;
-      if (match.index > lastIndex) {
-        container.appendChild(document.createTextNode(text.slice(lastIndex, match.index)));
+      const { raw } = stripTrailingPunctuation(match[0]);
+      if (raw) ranges.push([match.index, match.index + raw.length]);
+    }
+    return ranges;
+  }
+
+  // ---------------------------------------------------------------------
+  // Formatação de texto estilo WhatsApp
+  //
+  //   *negrito*  ou  **negrito**
+  //   _itálico_
+  //   ~riscado~  ou  ~~riscado~~
+  //   `código`   e   ```bloco de código```
+  //
+  // A mensagem continua sendo guardada e copiada como texto puro, com os
+  // marcadores - a formatação existe só na hora de desenhar o balão. Tudo é
+  // montado com nós de DOM (createElement/createTextNode), nunca innerHTML:
+  // exatamente tão seguro quanto o textContent que isto substitui.
+  //
+  // Regras (as mesmas do WhatsApp, pra não formatar o que não era pra ser):
+  //  - o marcador de abertura não pode vir colado depois de letra/número
+  //    ("2*3*4", "nome_do_arquivo" ficam como estão) e tem que ser seguido
+  //    de algo que não seja espaço;
+  //  - o de fechamento tem que vir colado no fim do trecho e não pode ser
+  //    seguido de letra/número;
+  //  - o trecho precisa ter pelo menos uma letra ou número ("*-*", "^_^"
+  //    continuam sendo carinhas);
+  //  - não atravessa quebra de linha (só o bloco de ``` atravessa);
+  //  - marcador dentro de um link nunca conta (URLs vivem cheias de _ e ~).
+  // Os duplos vêm antes dos simples na lista pra "**a**" não virar um
+  // negrito de "*a*" com asterisco sobrando.
+  // ---------------------------------------------------------------------
+  const FORMAT_MARKERS = [
+    { mark: '```', tag: 'code', cls: 'msg-code msg-code-block', literal: true, multiline: true },
+    { mark: '`', tag: 'code', cls: 'msg-code', literal: true },
+    { mark: '**', tag: 'strong' },
+    { mark: '~~', tag: 's' },
+    { mark: '*', tag: 'strong' },
+    { mark: '~', tag: 's' },
+    { mark: '_', tag: 'em' },
+  ];
+  const FORMAT_MARKER_CHARS = '`*~_';
+  // Letra ou número em qualquer alfabeto (ver safeRegExp lá em cima pro
+  // porquê de não ser um literal); o reserva cobre o latim com acentos.
+  const WORD_CHAR_RE = safeRegExp('[\\p{L}\\p{N}]', 'u', /[0-9A-Za-z\u00C0-\u024F]/);
+  const HAS_WORD_CHAR_RE = WORD_CHAR_RE;
+  const MAX_FORMAT_DEPTH = 4;
+
+  // Desenha `text` dentro de `container` com formatação e (por padrão)
+  // links clicáveis. opts.links === false deixa os links como texto - usado
+  // nas citações/prévias, onde o clique já tem outro significado.
+  function renderRich(container, text, opts) {
+    text = String(text == null ? '' : text);
+    const urlRanges = (!opts || opts.links !== false) ? findUrlRanges(text) : [];
+    const inUrl = (i) => {
+      for (const r of urlRanges) {
+        if (i >= r[0] && i < r[1]) return true;
       }
-      const { raw, trail } = stripTrailingPunctuation(match[0]);
-      const href = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
-      const a = document.createElement('a');
-      a.className = 'msg-link';
-      a.href = href;
-      a.textContent = raw;
-      a.target = '_blank';
-      a.rel = 'noopener noreferrer nofollow';
-      // Don't let a tap-to-open-link also trigger the bubble's own click
-      // handling (reply-quote scrolling etc. elsewhere uses bubble clicks).
-      a.addEventListener('click', (e) => e.stopPropagation());
-      container.appendChild(a);
-      if (trail) container.appendChild(document.createTextNode(trail));
-      lastIndex = match.index + match[0].length;
+      return false;
+    };
+
+    // Trecho sem formatação: texto puro, com os links que caírem dentro dele.
+    // Um link nunca é cortado ao meio por um marcador (marcador dentro de
+    // link é ignorado), mas o Math.max/min segura qualquer caso de borda.
+    function emitPlain(parent, from, to) {
+      let pos = from;
+      for (const [a, b] of urlRanges) {
+        if (b <= pos || a >= to) continue;
+        const start = Math.max(a, pos);
+        const end = Math.min(b, to);
+        if (start > pos) parent.appendChild(document.createTextNode(text.slice(pos, start)));
+        parent.appendChild(makeLink(text.slice(start, end)));
+        pos = end;
+      }
+      if (pos < to) parent.appendChild(document.createTextNode(text.slice(pos, to)));
     }
-    if (!any) {
-      container.textContent = text;
-      return;
+
+    // Tem um par abre/fecha válido começando exatamente em `i`?
+    function matchAt(i, to) {
+      if (inUrl(i)) return null;
+      for (const m of FORMAT_MARKERS) {
+        if (!text.startsWith(m.mark, i)) continue;
+        const len = m.mark.length;
+        const innerStart = i + len;
+        if (innerStart >= to) continue;
+        const first = text[innerStart];
+        // "**" que não fechou como duplo não vira um simples vazio.
+        if (len === 1 && first === m.mark) continue;
+        if (!m.literal && (/\s/.test(first) || WORD_CHAR_RE.test(text[i - 1] || ''))) continue;
+
+        let limit = to;
+        if (!m.multiline) {
+          const nl = text.indexOf('\n', innerStart);
+          if (nl !== -1 && nl < limit) limit = nl;
+        }
+        let j = innerStart + 1;
+        let close = -1;
+        while ((j = text.indexOf(m.mark, j)) !== -1 && j + len <= limit) {
+          // Marcador simples colado em outro igual ("**") não fecha nada:
+          // é pedaço de um duplo que está aninhado aqui dentro.
+          const doubled = len === 1 && (text[j - 1] === m.mark || text[j + 1] === m.mark);
+          if (m.literal
+              || (!doubled && !inUrl(j) && !/\s/.test(text[j - 1]) && !WORD_CHAR_RE.test(text[j + len] || ''))) {
+            close = j;
+            break;
+          }
+          j += 1;
+        }
+        if (close === -1) continue;
+        if (!m.literal && !HAS_WORD_CHAR_RE.test(text.slice(innerStart, close))) continue;
+        return { m, innerStart, innerEnd: close, end: close + len };
+      }
+      return null;
     }
-    if (lastIndex < text.length) {
-      container.appendChild(document.createTextNode(text.slice(lastIndex)));
+
+    function walk(parent, from, to, depth) {
+      let plainStart = from;
+      let i = from;
+      while (i < to) {
+        // Atalho: a esmagadora maioria dos caracteres não é marcador.
+        const hit = FORMAT_MARKER_CHARS.includes(text[i]) && depth < MAX_FORMAT_DEPTH
+          ? matchAt(i, to)
+          : null;
+        if (!hit) {
+          i += 1;
+          continue;
+        }
+        emitPlain(parent, plainStart, i);
+        const el = document.createElement(hit.m.tag);
+        if (hit.m.cls) el.className = hit.m.cls;
+        if (hit.m.literal) {
+          // Código é literal: nada lá dentro vira formatação nem link. O
+          // bloco de ``` descarta a quebra de linha colada nos marcadores.
+          let inner = text.slice(hit.innerStart, hit.innerEnd);
+          if (hit.m.multiline) inner = inner.replace(/^\n/, '').replace(/\n$/, '');
+          el.textContent = inner;
+        } else {
+          walk(el, hit.innerStart, hit.innerEnd, depth + 1);
+        }
+        parent.appendChild(el);
+        i = hit.end;
+        plainStart = i;
+      }
+      emitPlain(parent, plainStart, to);
     }
+
+    walk(container, 0, text.length, 0);
   }
 
   // Compact Open Graph preview card for the first link in a message (see
@@ -1195,17 +1469,18 @@
   }
 
   // ---------------------------------------------------------------------
-  // Reações (❤️ 👍 😂 😮 😢 🔥)
+  // Reações (qualquer emoji)
   //
   // Uma reação por pessoa por mensagem, com toggle: reagir com o mesmo
-  // emoji remove, com outro troca. A escolha sai da barra no topo do
-  // #msg-menu ou de um toque no próprio chip embaixo do balão. A UI
+  // emoji remove, com outro troca. A escolha sai dos atalhos no topo do
+  // #msg-menu, da folha de emojis (o "+" ao lado deles) ou de um toque no
+  // próprio chip embaixo do balão. A UI
   // atualiza pelo SSE "message-reacted" (igual a apagar/enviar), não pela
   // resposta do fetch. A identidade é myName(), o mesmo critério de lado
   // da bolha e do requesterName usado em apagar/visualização única.
   // ---------------------------------------------------------------------
   async function sendReaction(id, emoji) {
-    if (!REACTION_EMOJIS.includes(emoji)) return;
+    if (!isSingleEmoji(emoji)) return;
     if (!myName()) {
       focusNameInput();
       return;
@@ -1276,6 +1551,8 @@
     }
   }
 
+  const STICKER_BUBBLE_PX = 150; // lado máximo da figurinha na conversa (ver .sticker-img)
+
   function buildBubbleContent(bubble, m) {
     if (m.type === 'text') {
       // Card de preview ACIMA do texto (estilo WhatsApp). Já vem resolvido
@@ -1288,7 +1565,7 @@
       // block that may already have been appended before this call.
       const textEl = document.createElement('span');
       textEl.className = 'bubble-text';
-      linkify(textEl, m.text);
+      renderRich(textEl, m.text);
       bubble.appendChild(textEl);
       // A hora é absoluta no canto do balão (ver .msg-time); a ordem no DOM
       // não muda onde ela aparece, mas deixamos por último por clareza.
@@ -1331,6 +1608,34 @@
         reserveMediaBox(img, m.width, m.height);
       }
       img.addEventListener('click', () => openLightbox('image', img.src));
+      wrap.appendChild(img);
+      if (isGifMessage(m)) {
+        const badge = document.createElement('span');
+        badge.className = 'gif-badge';
+        badge.textContent = 'GIF';
+        wrap.appendChild(badge);
+      }
+      wrap.appendChild(makeTimeEl(m.ts, true));
+      bubble.appendChild(wrap);
+    } else if (m.type === 'sticker') {
+      // Figurinha: sem balão em volta (como no WhatsApp), a não ser que seja
+      // resposta a alguma mensagem - aí a citação precisa do balão pra morar.
+      if (!m.replyTo) bubble.classList.add('sticker-bubble');
+      const wrap = document.createElement('span');
+      wrap.className = 'sticker-wrap';
+      const img = document.createElement('img');
+      img.className = 'sticker-img';
+      img.src = api(`/api/media/${m.mediaId}`);
+      img.alt = 'Figurinha';
+      img.decoding = 'async';
+      img.draggable = false;
+      // Mesmo motivo do reserveMediaBox das fotos: caixa definida desde o
+      // primeiro paint, pra lista não pular quando o arquivo chega.
+      if (m.width && m.height) {
+        const scale = Math.min(1, STICKER_BUBBLE_PX / Math.max(m.width, m.height));
+        img.style.width = `${Math.max(1, Math.round(m.width * scale))}px`;
+        img.style.height = `${Math.max(1, Math.round(m.height * scale))}px`;
+      }
       wrap.appendChild(img);
       wrap.appendChild(makeTimeEl(m.ts, true));
       bubble.appendChild(wrap);
@@ -1505,6 +1810,8 @@
     const row = document.createElement('div');
     row.className = `msg-row ${mine ? 'me' : 'them'}${grouped ? ' grouped' : ''}${animate ? ' msg-enter' : ''}`;
     row.dataset.id = m.id;
+    // Estrelinha ao lado da hora nas mensagens que EU favoritei (CSS).
+    if (!m.deleted && isStarredByMe(m)) row.classList.add('is-starred');
 
     // Esta mensagem se agrupa com a anterior → a bolha de cima deixa de ser a
     // última do grupo e perde o canto "apontado" (ver .has-follower no CSS).
@@ -1588,7 +1895,7 @@
         qSender.textContent = m.replyTo.sender;
         const qSnippet = document.createElement('div');
         qSnippet.className = 'reply-quote-snippet';
-        qSnippet.textContent = m.replyTo.snippet;
+        renderRich(qSnippet, m.replyTo.snippet, { links: false });
         qText.appendChild(qSender);
         qText.appendChild(qSnippet);
         quote.appendChild(qText);
@@ -1635,6 +1942,12 @@
     // chegou pelo SSE, fecha - não faz sentido "Responder/Copiar/Apagar" um
     // balão que virou "mensagem apagada".
     if (activeMenuMsgId === id) closeMessageMenu();
+    // Mensagem apagada não carrega mais reação nem estrela (o servidor
+    // limpa as duas) - tira da tela também, senão ficavam penduradas embaixo
+    // do "mensagem apagada" até o próximo re-render.
+    row.classList.remove('is-starred');
+    const chips = row.querySelector('.msg-reactions');
+    if (chips) chips.remove();
     const bubble = row.querySelector('.bubble');
     if (bubble) {
       // Grab whatever time text is already showing (works whether this
@@ -1948,10 +2261,16 @@
     if (e.key !== 'Escape') return;
     if (activeMenuMsgId !== null) return;
     if (cameraMenuCtl.isOpen() || plusMenuCtl.isOpen()) return;
-    if (!lightbox.classList.contains('hidden')) {
+    if (isEmojiSheetOpen()) {
+      closeEmojiSheet();
+    } else if (!lightbox.classList.contains('hidden')) {
       lightbox.classList.add('hidden');
     } else if (isMediaPanelOpen()) {
       closeMediaPanel();
+    } else if (isFavPanelOpen()) {
+      closeFavPanel();
+    } else if (isTrayOpen()) {
+      closeTray();
     }
   });
 
@@ -2369,6 +2688,18 @@
       patchLoadedMessage(id, { reactions });
       applyReactions(id, reactions);
     });
+    es.addEventListener('message-starred', (evt) => {
+      const { id, starredBy } = JSON.parse(evt.data);
+      patchLoadedMessage(id, { starredBy });
+      applyStar(id, starredBy);
+    });
+    es.addEventListener('stickers-changed', () => {
+      refreshLibrary();
+    });
+    es.addEventListener('typing', (evt) => {
+      const { name } = JSON.parse(evt.data);
+      if (name && !sameName(name, myName())) showTyping(name);
+    });
     es.addEventListener('message', (evt) => {
       // Only auto-follow to the new message if the person was already at
       // (or very near) the bottom — otherwise this would yank them away
@@ -2379,9 +2710,16 @@
       // they were scrolled.
       const wasNearBottom = isNearBottom();
       const m = JSON.parse(evt.data);
+      // Reconexão do EventSource pode reentregar a última mensagem: a lista
+      // autoritativa não pode ganhar a mesma mensagem duas vezes.
+      if (renderedIds.has(m.id)) return;
       loadedMessages.push(m);
       renderMessage(m, { animate: true });
       addMediaItemToTop(m);
+      if (!sameName(m.sender, myName())) {
+        hideTyping();
+        noteUnread();
+      }
       if (wasNearBottom || sameName(m.sender, myName())) {
         scrollToBottomWhenReady();
       } else {
@@ -2391,12 +2729,16 @@
     es.addEventListener('cleared', () => {
       resetMessagesView();
       resetMediaPanel();
+      resetFavPanel();
     });
     es.addEventListener('message-deleted', (evt) => {
       const { id, expiredEphemeral, deletedBy } = JSON.parse(evt.data);
-      patchLoadedMessage(id, { deleted: true, deletedBy, expiredEphemeral: !!expiredEphemeral });
+      patchLoadedMessage(id, {
+        deleted: true, deletedBy, expiredEphemeral: !!expiredEphemeral, starredBy: undefined, reactions: undefined,
+      });
       applyDeletedPlaceholder(id, expiredEphemeral, deletedBy);
       removeMediaItem(id);
+      removeFavItem(id);
     });
     // The other person opened a view-once photo/video I sent - just a
     // label update (locked → "Aberto"); the media itself never reaches
@@ -2423,23 +2765,25 @@
   function showLogin() {
     loginScreen.classList.remove('hidden');
     chatScreen.classList.add('hidden');
-    decoyScreen.classList.add('hidden');
+    noticeScreen.classList.add('hidden');
     nameScreen.classList.add('hidden');
     // O painel de mídia é fixed e vive fora das .screen, então sair não o
     // esconde sozinho. Zerar também descarta os metadados que ficaram em
     // memória da sessão anterior.
     closeMediaPanel();
     resetMediaPanel();
+    closeFavPanel();
+    resetFavPanel();
+    closeTray();
+    closeEmojiSheet();
     codeInput.focus();
   }
 
-  // Tela-armadilha: nada de mensagens, SSE ou qualquer chamada que toque o
-  // chat de verdade - só o texto fixo, pra quem digitou o código-armadilha
-  // não ver nada além disso.
-  function showDecoy() {
+  // Só o aviso fixo: sem mensagens, sem SSE, sem nenhuma chamada à API.
+  function showNotice() {
     loginScreen.classList.add('hidden');
     chatScreen.classList.add('hidden');
-    decoyScreen.classList.remove('hidden');
+    noticeScreen.classList.remove('hidden');
     nameScreen.classList.add('hidden');
     closeMediaPanel();
   }
@@ -2458,7 +2802,7 @@
   function showNamePrompt() {
     loginScreen.classList.add('hidden');
     chatScreen.classList.add('hidden');
-    decoyScreen.classList.add('hidden');
+    noticeScreen.classList.add('hidden');
     nameScreen.classList.remove('hidden');
     nameScreenInput.value = localStorage.getItem(NAME_KEY) || '';
     nameScreenInput.focus();
@@ -2490,6 +2834,9 @@
     // Same reasoning: #messages has no real clientWidth until the screen is
     // actually visible, so this can only run now, before the first render.
     updateMediaMaxWidth();
+    // Atalhos de reação, coleção de figurinhas/GIFs e recursos opcionais do
+    // servidor. Não segura a primeira pintura: as mensagens vêm em paralelo.
+    loadBoot();
     await loadMessages();
     connectStream();
     textInput.focus();
@@ -2507,9 +2854,9 @@
         body: JSON.stringify({ code }),
       });
       const data = await res.json();
-      if (res.ok && data.ok && data.decoy) {
+      if (res.ok && data.ok && data.notice) {
         codeInput.value = '';
-        showDecoy();
+        showNotice();
       } else if (res.ok && data.ok) {
         codeInput.value = '';
         showChat();
@@ -2519,6 +2866,166 @@
     } catch (err) {
       loginError.textContent = 'Erro de conexao.';
     }
+  });
+
+  // ===== Portal secreto "Hermes" =====
+  // A senha é digitada no composer e interceptada ANTES de virar mensagem
+  // (igual ao contador de "te amo" e ao Konami): nunca é enviada pro outro
+  // lado nem salva no histórico. Abre uma tela cheia temática que conversa
+  // DE VERDADE com o Hermes Agent local via POST /api/hermes (o servidor
+  // roda `hermes --oneshot` só com o toolset "memory" - sem terminal,
+  // browser ou redes sociais). Tudo aqui é efêmero: vive só em memória,
+  // nada é persistido nem transmitido.
+  // O gatilho em si não mora mais no código: fica no .env do servidor
+  // (HERMES_TRIGGER) e o /api/boot entrega só um hash com sal. Aqui a gente
+  // compara o hash do que foi digitado - então nem quem lê este arquivo (ele
+  // é público e servido antes do login) descobre a frase. Sem a variável no
+  // servidor, ou fora de https/localhost (crypto.subtle não existe), o
+  // portal simplesmente não abre.
+  let hermesCfg = null;
+  const hermesPortal = document.getElementById('hermes-portal');
+  const hermesLog = document.getElementById('hermes-log');
+  const hermesStatusEl = document.getElementById('hermes-status');
+  const hermesComposer = document.getElementById('hermes-composer');
+  const hermesInput = document.getElementById('hermes-input');
+  const hermesExitBtn = document.getElementById('hermes-exit');
+  let hermesHistory = [];
+  let hermesBusy = false;
+  let hermesOpen = false;
+  let hermesOpenTimer = null;
+
+  async function isHermesTrigger(text) {
+    if (!hermesCfg || !hermesCfg.hash || text.length > 200) return false;
+    if (!window.crypto || !window.crypto.subtle || !window.TextEncoder) return false;
+    try {
+      const bytes = new TextEncoder().encode(`${hermesCfg.salt}:${text}`);
+      const digest = await window.crypto.subtle.digest('SHA-256', bytes);
+      const hex = Array.from(new Uint8Array(digest), (b) => b.toString(16).padStart(2, '0')).join('');
+      return hex === hermesCfg.hash;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function setHermesStatus(txt, state) {
+    if (hermesStatusEl) hermesStatusEl.textContent = txt;
+    if (hermesPortal) hermesPortal.dataset.state = state || '';
+  }
+
+  function appendHermesBubble(role, text) {
+    const row = document.createElement('div');
+    row.className = `hermes-msg hermes-${role}`;
+    const bubble = document.createElement('div');
+    bubble.className = 'hermes-bubble';
+    bubble.textContent = text;
+    row.appendChild(bubble);
+    hermesLog.appendChild(row);
+    hermesLog.scrollTop = hermesLog.scrollHeight;
+    return row;
+  }
+
+  function showHermesTyping() {
+    const row = document.createElement('div');
+    row.className = 'hermes-msg hermes-hermes';
+    const bubble = document.createElement('div');
+    bubble.className = 'hermes-bubble hermes-typing';
+    bubble.appendChild(document.createElement('span'));
+    bubble.appendChild(document.createElement('span'));
+    bubble.appendChild(document.createElement('span'));
+    row.appendChild(bubble);
+    hermesLog.appendChild(row);
+    hermesLog.scrollTop = hermesLog.scrollHeight;
+    return row;
+  }
+
+  function openHermesPortal() {
+    if (!hermesPortal || hermesOpen) return;
+    hermesOpen = true;
+    hermesHistory = [];
+    hermesLog.replaceChildren();
+    hermesPortal.classList.remove('hidden');
+    hermesPortal.setAttribute('aria-hidden', 'false');
+    setHermesStatus('estabelecendo contato…', 'connecting');
+    try { hermesInput.focus(); } catch (e) {}
+    // Abertura de canal só visual; depois libera a conversa.
+    hermesOpenTimer = setTimeout(() => {
+      if (!hermesOpen) return;
+      setHermesStatus('canal aberto', 'ready');
+      appendHermesBubble('sys', 'Canal com o Hermes aberto. Fale à vontade.');
+    }, 1600);
+  }
+
+  function closeHermesPortal() {
+    if (!hermesPortal) return;
+    hermesOpen = false;
+    if (hermesOpenTimer) { clearTimeout(hermesOpenTimer); hermesOpenTimer = null; }
+    hermesPortal.classList.add('hidden');
+    hermesPortal.setAttribute('aria-hidden', 'true');
+    hermesInput.value = '';
+    hermesInput.style.height = 'auto';
+    hermesHistory = [];
+    hermesLog.replaceChildren();
+    setHermesStatus('estabelecendo contato…', '');
+  }
+
+  async function sendToHermes(text) {
+    if (hermesBusy) return;
+    hermesBusy = true;
+    appendHermesBubble('juan', text);
+    hermesHistory.push({ role: 'juan', text });
+    const typingRow = showHermesTyping();
+    setHermesStatus('Hermes está respondendo…', 'thinking');
+    try {
+      const res = await fetch(api('/api/hermes'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, history: hermesHistory.slice(-12) }),
+      });
+      const data = await res.json().catch(() => ({}));
+      typingRow.remove();
+      if (res.ok && data && data.ok && data.reply) {
+        appendHermesBubble('hermes', data.reply);
+        hermesHistory.push({ role: 'hermes', text: data.reply });
+        setHermesStatus('canal aberto', 'ready');
+      } else {
+        const msg = (data && data.message) || 'Não consegui falar com o Hermes agora.';
+        appendHermesBubble('sys', msg);
+        setHermesStatus('sem resposta do Hermes', 'error');
+      }
+    } catch (err) {
+      typingRow.remove();
+      appendHermesBubble('sys', 'Falha de conexão com o Hermes.');
+      setHermesStatus('sem conexão', 'error');
+    } finally {
+      hermesBusy = false;
+      try { hermesInput.focus(); } catch (e) {}
+    }
+  }
+
+  if (hermesComposer) {
+    hermesComposer.addEventListener('submit', (e) => {
+      e.preventDefault();
+      const text = hermesInput.value.trim();
+      if (!text || hermesBusy) return;
+      hermesInput.value = '';
+      hermesInput.style.height = 'auto';
+      sendToHermes(text);
+    });
+    hermesInput.addEventListener('input', () => {
+      hermesInput.style.height = 'auto';
+      hermesInput.style.height = `${hermesInput.scrollHeight}px`;
+    });
+    hermesInput.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' || e.isComposing || e.keyCode === 229) return;
+      const touch = window.matchMedia('(pointer: coarse)').matches;
+      if (touch || e.shiftKey) return;
+      e.preventDefault();
+      hermesComposer.requestSubmit();
+    });
+  }
+  if (hermesExitBtn) hermesExitBtn.addEventListener('click', closeHermesPortal);
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && hermesOpen) closeHermesPortal();
   });
 
   composer.addEventListener('submit', async (e) => {
@@ -2542,8 +3049,14 @@
       showKonamiHeart();
       return;
     }
+    // Limpa o campo ANTES do await do hash: um segundo Enter nesse
+    // intervalo não pode mandar a mesma mensagem duas vezes.
     textInput.value = '';
     syncTextInputUI();
+    if (await isHermesTrigger(text)) {
+      openHermesPortal();
+      return;
+    }
     const replyToId = replyingTo ? replyingTo.id : undefined;
     clearReplyingTo();
     try {
@@ -2589,6 +3102,180 @@
   }
   textInput.addEventListener('input', syncTextInputUI);
   syncTextInputUI();
+
+  // Gravar e enviar áudio - botão de enviar dobra como microfone quando o
+  // campo de texto está vazio (estilo WhatsApp), reaproveitando o MESMO
+  // botão/posição em vez de um segundo botão que empurraria o layout do
+  // composer (esse app já sofreu bastante com deslocamento de layout, ver
+  // v8/v13/v14 no histórico - não vale a pena arriscar de novo aqui).
+  const micCapable = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder);
+  if (micCapable) sendBtn.classList.add('mic-capable');
+
+  const AUDIO_MIME_CANDIDATES = [
+    'audio/webm;codecs=opus',
+    'audio/webm',
+    'audio/mp4',
+    'audio/mp4;codecs=mp4a.40.2',
+    'audio/ogg;codecs=opus',
+  ];
+  function pickAudioMimeType() {
+    if (!window.MediaRecorder || !MediaRecorder.isTypeSupported) return '';
+    for (const type of AUDIO_MIME_CANDIDATES) {
+      if (MediaRecorder.isTypeSupported(type)) return type;
+    }
+    return '';
+  }
+  function extForAudioMime(mime) {
+    if (mime.includes('mp4') || mime.includes('m4a')) return 'm4a';
+    if (mime.includes('ogg')) return 'ogg';
+    return 'webm';
+  }
+  function formatRecordTime(ms) {
+    const totalSec = Math.max(0, Math.floor(ms / 1000));
+    const m = Math.floor(totalSec / 60);
+    const s = totalSec % 60;
+    return `${m}:${String(s).padStart(2, '0')}`;
+  }
+
+  // Corte automático - protege contra gravação esquecida ligada e mantém
+  // o arquivo dentro do MAX_UPLOAD_MB do servidor (server.js).
+  const MAX_RECORD_MS = 5 * 60 * 1000;
+
+  let mediaRecorder = null;
+  let recordStream = null;
+  let recordedChunks = [];
+  let recordStartTs = 0;
+  let recordTimerInterval = null;
+  let recordCancelledFlag = false;
+  let isRecording = false;
+
+  function enterRecordingUI() {
+    plusBtn.classList.add('hidden');
+    cameraBtn.classList.add('hidden');
+    textInputWrap.classList.add('hidden');
+    recordCancelBtn.classList.remove('hidden');
+    recordBar.classList.remove('hidden');
+    sendBtn.classList.add('is-recording');
+  }
+
+  function exitRecordingUI() {
+    plusBtn.classList.remove('hidden');
+    cameraBtn.classList.remove('hidden');
+    textInputWrap.classList.remove('hidden');
+    recordCancelBtn.classList.add('hidden');
+    recordBar.classList.add('hidden');
+    sendBtn.classList.remove('is-recording');
+  }
+
+  function updateRecordTimer() {
+    recordTimerEl.textContent = formatRecordTime(Date.now() - recordStartTs);
+    if (Date.now() - recordStartTs >= MAX_RECORD_MS) {
+      toast('Duração máxima de áudio atingida - enviando.');
+      stopRecording(false);
+    }
+  }
+
+  async function startRecording() {
+    if (isRecording || !micCapable) return;
+    const sender = myName();
+    if (!sender) {
+      focusNameInput();
+      return;
+    }
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    } catch (err) {
+      toast('Não foi possível acessar o microfone.');
+      return;
+    }
+    // Alguém pode ter começado a digitar (ou o gesto pode ter disparado
+    // duas vezes) enquanto o getUserMedia (assíncrono, espera permissão do
+    // usuário) ainda estava pendente - se já tem gravação rolando ou o
+    // texto deixou de estar vazio nesse meio-tempo, descarta essa stream
+    // sem nunca chegar a gravar nada.
+    if (isRecording || textInput.value.trim()) {
+      stream.getTracks().forEach((t) => t.stop());
+      return;
+    }
+    const mimeType = pickAudioMimeType();
+    try {
+      mediaRecorder = mimeType ? new MediaRecorder(stream, { mimeType }) : new MediaRecorder(stream);
+    } catch (err) {
+      stream.getTracks().forEach((t) => t.stop());
+      toast('Gravação de áudio não é suportada neste navegador.');
+      return;
+    }
+    recordStream = stream;
+    recordedChunks = [];
+    recordCancelledFlag = false;
+    mediaRecorder.addEventListener('dataavailable', (e) => {
+      if (e.data && e.data.size > 0) recordedChunks.push(e.data);
+    });
+    mediaRecorder.addEventListener('stop', onRecordingStopped);
+    isRecording = true;
+    recordStartTs = Date.now();
+    enterRecordingUI();
+    updateRecordTimer();
+    recordTimerInterval = setInterval(updateRecordTimer, 250);
+    mediaRecorder.start();
+  }
+
+  function stopRecording(cancelled) {
+    if (!isRecording || !mediaRecorder) return;
+    recordCancelledFlag = cancelled;
+    clearInterval(recordTimerInterval);
+    recordTimerInterval = null;
+    if (mediaRecorder.state !== 'inactive') {
+      mediaRecorder.stop();
+    } else {
+      onRecordingStopped();
+    }
+  }
+
+  async function onRecordingStopped() {
+    const cancelled = recordCancelledFlag;
+    const chunks = recordedChunks;
+    const mimeType = (mediaRecorder && mediaRecorder.mimeType) || (chunks[0] && chunks[0].type) || 'audio/webm';
+    const elapsedMs = Date.now() - recordStartTs;
+    recordedChunks = [];
+    if (recordStream) {
+      recordStream.getTracks().forEach((t) => t.stop());
+      recordStream = null;
+    }
+    mediaRecorder = null;
+    isRecording = false;
+    exitRecordingUI();
+    syncTextInputUI();
+    if (cancelled || !chunks.length) return;
+    if (elapsedMs < 700) {
+      toast('Gravação muito curta.');
+      return;
+    }
+    const blob = new Blob(chunks, { type: mimeType });
+    const ext = extForAudioMime(mimeType);
+    const file = new File([blob], `audio-${Date.now()}.${ext}`, { type: mimeType });
+    await uploadFiles([file], false);
+  }
+
+  recordCancelBtn.addEventListener('click', () => stopRecording(true));
+
+  // Intercepta o clique no botão de enviar ANTES do submit do form: se tem
+  // texto, deixa o comportamento normal (submit envia a mensagem de
+  // texto); se está vazio, o clique vira "começar/parar gravação" em vez
+  // de submeter o form (que já é um no-op com texto vazio de qualquer
+  // jeito - ver composer.addEventListener('submit', ...) acima).
+  sendBtn.addEventListener('click', (e) => {
+    if (isRecording) {
+      e.preventDefault();
+      stopRecording(false);
+      return;
+    }
+    if (!textInput.value.trim() && micCapable) {
+      e.preventDefault();
+      startRecording();
+    }
+  });
 
   // Miolo comum aos dois menus flutuantes do composer (câmera e "+"):
   // posiciona acima do botão que abriu, travado nas bordas da viewport
@@ -2858,7 +3545,9 @@
     let failCount = 0;
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
-      uploadProgress.textContent = files.length > 1 ? `Enviando ${i + 1} de ${files.length}...` : `Enviando ${file.name}...`;
+      uploadProgress.textContent = files.length > 1
+        ? `Enviando ${i + 1} de ${files.length}...`
+        : (file.type.startsWith('audio/') ? 'Enviando áudio...' : `Enviando ${file.name}...`);
       uploadProgress.classList.remove('hidden');
 
       const meta = await readMediaMeta(file);
@@ -2912,6 +3601,1206 @@
     const wantsEphemeral = pendingCameraEphemeral;
     pendingCameraEphemeral = false;
     uploadFiles(files, wantsEphemeral);
+  });
+
+  // =====================================================================
+  // Pequenos confortos: "digitando…", contador de não lidas no título,
+  // colar/arrastar imagem e atalhos de formatação
+  // =====================================================================
+  const typingEl = document.getElementById('typing-indicator');
+  let typingTimer = null;
+  let lastTypingPing = 0;
+
+  function hideTyping() {
+    clearTimeout(typingTimer);
+    typingTimer = null;
+    typingEl.classList.add('hidden');
+  }
+  // O aviso some sozinho se os pings pararem (a pessoa parou de digitar ou
+  // fechou a aba) e na hora que a mensagem dela chega.
+  function showTyping() {
+    typingEl.textContent = 'digitando…';
+    typingEl.classList.remove('hidden');
+    clearTimeout(typingTimer);
+    typingTimer = setTimeout(hideTyping, 4500);
+  }
+  // No máximo um ping a cada 2,5s enquanto houver texto no campo. Não manda
+  // nada do que está sendo escrito - só o nome.
+  function pingTyping() {
+    if (!textInput.value.trim() || !myName()) return;
+    const now = Date.now();
+    if (now - lastTypingPing < 2500) return;
+    lastTypingPing = now;
+    fetch(api('/api/typing'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: myName() }),
+    }).catch(() => {});
+  }
+  textInput.addEventListener('input', pingTyping);
+
+  // Mensagem chegou com a aba em segundo plano: "(2) conversa" na aba, só
+  // um número - nada do conteúdo nem de quem mandou vai parar no título.
+  const BASE_TITLE = document.title;
+  let unreadCount = 0;
+  function noteUnread() {
+    if (!document.hidden) return;
+    unreadCount += 1;
+    document.title = `(${unreadCount}) ${BASE_TITLE}`;
+  }
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && unreadCount) {
+      unreadCount = 0;
+      document.title = BASE_TITLE;
+    }
+  });
+
+  // Colar (Ctrl/Cmd+V) uma imagem ou GIF direto no campo de mensagem envia
+  // como mídia - print de tela no computador, GIF copiado do teclado no
+  // celular. Se junto veio texto de verdade (planilha, editor de texto, que
+  // copiam os dois), vale o texto: quem cola texto quer texto.
+  textInput.addEventListener('paste', (e) => {
+    const cd = e.clipboardData;
+    if (!cd) return;
+    const files = Array.from(cd.files || []);
+    if (!files.length) return;
+    if ((cd.getData('text/plain') || '').trim()) return;
+    e.preventDefault();
+    uploadFiles(files, false);
+  });
+
+  // Arrastar arquivo pra dentro da conversa (desktop) envia também.
+  chatScreen.addEventListener('dragover', (e) => {
+    if (!e.dataTransfer || !Array.from(e.dataTransfer.types || []).includes('Files')) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'copy';
+    chatScreen.classList.add('is-dragover');
+  });
+  chatScreen.addEventListener('dragleave', (e) => {
+    if (e.target === chatScreen || !chatScreen.contains(e.relatedTarget)) {
+      chatScreen.classList.remove('is-dragover');
+    }
+  });
+  chatScreen.addEventListener('drop', (e) => {
+    chatScreen.classList.remove('is-dragover');
+    const files = Array.from((e.dataTransfer && e.dataTransfer.files) || []);
+    if (!files.length) return;
+    e.preventDefault();
+    uploadFiles(files, false);
+  });
+
+  // Ctrl/Cmd+B, +I e +Shift+X envolvem a seleção nos marcadores de negrito,
+  // itálico e riscado (ver renderRich) - o mesmo atalho de qualquer editor.
+  function wrapSelection(mark) {
+    const start = textInput.selectionStart;
+    const end = textInput.selectionEnd;
+    const selected = textInput.value.slice(start, end);
+    textInput.setRangeText(`${mark}${selected}${mark}`, start, end, 'end');
+    // Com seleção: mantém o trecho selecionado. Sem: cursor entre os dois.
+    textInput.setSelectionRange(start + mark.length, end + mark.length);
+    syncTextInputUI();
+  }
+  textInput.addEventListener('keydown', (e) => {
+    if (!(e.ctrlKey || e.metaKey) || e.altKey) return;
+    const key = e.key.toLowerCase();
+    let mark = null;
+    if (key === 'b' && !e.shiftKey) mark = '*';
+    else if (key === 'i' && !e.shiftKey) mark = '_';
+    else if (key === 'x' && e.shiftKey) mark = '~';
+    if (!mark) return;
+    e.preventDefault();
+    wrapSelection(mark);
+  });
+
+  // =====================================================================
+  // Seletor de emoji
+  //
+  // Uma grade por categoria, usada em dois lugares: a aba "Emoji" da bandeja
+  // (insere no campo de mensagem - útil principalmente no computador, que
+  // não tem teclado de emoji à mão) e a folha de reação (reagir com qualquer
+  // emoji / trocar os atalhos). Sem biblioteca: a lista é só texto.
+  // =====================================================================
+  const EMOJI_CATEGORIES = [
+    {
+      icon: '😀',
+      label: 'Carinhas',
+      emojis: '😀 😃 😄 😁 😆 😅 🤣 😂 🙂 🙃 😉 😊 😇 🥰 😍 🤩 😘 😗 😚 😙 😋 😛 😜 🤪 😝 🤑 🤗 🤭 🤫 🤔 🤐 🤨 😐 😑 😶 😏 😒 🙄 😬 🤥 😌 😔 😪 🤤 😴 😷 🤒 🤕 🤢 🤮 🤧 🥵 🥶 🥴 😵 🤯 🤠 🥳 😎 🤓 🧐 😕 😟 🙁 ☹️ 😮 😯 😲 😳 🥺 😦 😧 😨 😰 😥 😢 😭 😱 😖 😣 😞 😓 😩 😫 🥱 😤 😡 😠 🤬 😈 👿 💀 ☠️ 💩 🤡 👹 👺 👻 👽 👾 🤖 😺 😸 😹 😻 😼 😽 🙀 😿 😾 🙈 🙉 🙊',
+    },
+    {
+      icon: '👍',
+      label: 'Gestos e pessoas',
+      emojis: '👋 🤚 🖐️ ✋ 🖖 👌 🤌 🤏 ✌️ 🤞 🤟 🤘 🤙 👈 👉 👆 🖕 👇 ☝️ 👍 👎 ✊ 👊 🤛 🤜 👏 🙌 👐 🤲 🤝 🙏 ✍️ 💅 🤳 💪 🦵 🦶 👂 👃 🧠 👀 👁️ 👅 👄 💋 👶 🧒 👦 👧 🧑 👨 👩 🧔 👴 👵 🙅 🙆 💁 🙋 🙇 🤦 🤷 💃 🕺 👯 🧘 🛀 🛌 👫 👬 👭 💏 💑 👪',
+    },
+    {
+      icon: '❤️',
+      label: 'Corações e símbolos',
+      emojis: '❤️ 🧡 💛 💚 💙 💜 🖤 🤍 🤎 💔 ❣️ 💕 💞 💓 💗 💖 💘 💝 💟 ♥️ 💌 💤 💢 💥 💫 💦 💨 🕳️ 💬 💭 🔥 ✨ ⭐ 🌟 ⚡ 🎉 🎊 💯 ✅ ❌ ❗ ❓ ⚠️ 🚫 🔞 ♻️ ➕ ➖ ✔️ 🆗 🆒 🆕 🔝 🔴 🟠 🟡 🟢 🔵 🟣 ⚫ ⚪',
+    },
+    {
+      icon: '🐶',
+      label: 'Animais e natureza',
+      emojis: '🐶 🐱 🐭 🐹 🐰 🦊 🐻 🐼 🐨 🐯 🦁 🐮 🐷 🐸 🐵 🐔 🐧 🐦 🐤 🦆 🦉 🦇 🐺 🐴 🦄 🐝 🦋 🐌 🐞 🐜 🕷️ 🐢 🐍 🦎 🐙 🦑 🦀 🐠 🐟 🐬 🐳 🦈 🐊 🐘 🦒 🐕 🐈 🐇 🌵 🎄 🌲 🌳 🌴 🌱 🌿 ☘️ 🍀 🍂 🍁 🌷 🌹 🥀 🌺 🌸 🌼 🌻 🌞 🌝 🌚 🌙 🌈 ☀️ ⛅ ☁️ 🌧️ ⛈️ ❄️ ☃️ 🌊',
+    },
+    {
+      icon: '🍔',
+      label: 'Comida e bebida',
+      emojis: '🍏 🍎 🍐 🍊 🍋 🍌 🍉 🍇 🍓 🍒 🍑 🥭 🍍 🥥 🥝 🍅 🥑 🍆 🥕 🌽 🌶️ 🥔 🍞 🥐 🧀 🥚 🍳 🥞 🥓 🍗 🍖 🌭 🍔 🍟 🍕 🥪 🌮 🌯 🥗 🍝 🍜 🍲 🍣 🍱 🍤 🍙 🍚 🍦 🍧 🍨 🍩 🍪 🎂 🍰 🧁 🍫 🍬 🍭 🍿 ☕ 🍵 🥤 🧃 🍺 🍻 🥂 🍷 🥃 🍸 🍹 🍾 🧉',
+    },
+    {
+      icon: '⚽',
+      label: 'Atividades e objetos',
+      emojis: '⚽ 🏀 🏈 ⚾ 🎾 🏐 🎱 🏓 🏸 🥊 🏋️ 🚴 🏊 🏄 🎮 🕹️ 🎲 🧩 🎯 🎳 🎬 🎤 🎧 🎼 🎹 🥁 🎸 🎻 🎨 📷 📸 🎥 📱 💻 ⌨️ 🖥️ 📺 ⏰ ⌛ 💡 🔦 🕯️ 💸 💵 💰 💳 💎 🔧 🔨 🔑 🔒 🔓 🎁 🎈 📦 ✉️ 📌 📎 ✂️ 📝 📚 📖 🔍 💊 🩹 🧸 👑 💍 👓 🕶️ 👗 👕 👟 👠 🎒',
+    },
+    {
+      icon: '✈️',
+      label: 'Viagem e lugares',
+      emojis: '🚗 🚕 🚌 🏎️ 🚓 🚑 🚒 🚚 🚜 🏍️ 🚲 ✈️ 🚀 🛸 🚁 ⛵ 🚢 🚂 🚇 ⛽ 🚦 🗺️ 🏠 🏡 🏢 🏥 🏫 ⛪ 🏖️ 🏝️ ⛰️ 🏔️ 🌋 🏕️ 🌅 🌄 🌃 🌆 🎡 🎢 🗽 🗼 🇧🇷',
+    },
+  ];
+
+  const RECENT_EMOJI_KEY = 'private-chat:recent-emojis';
+  const RECENT_EMOJI_MAX = 24;
+  function loadRecentEmojis() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(RECENT_EMOJI_KEY) || '[]');
+      if (Array.isArray(parsed)) return parsed.filter(isSingleEmoji).slice(0, RECENT_EMOJI_MAX);
+    } catch (e) { /* começa vazio */ }
+    return [];
+  }
+  let recentEmojis = loadRecentEmojis();
+  function noteRecentEmoji(emoji) {
+    recentEmojis = [emoji, ...recentEmojis.filter((x) => x !== emoji)].slice(0, RECENT_EMOJI_MAX);
+    try {
+      localStorage.setItem(RECENT_EMOJI_KEY, JSON.stringify(recentEmojis));
+    } catch (e) { /* sem espaço: os recentes só não sobrevivem ao reload */ }
+  }
+
+  // Monta (uma vez, na primeira abertura) a grade dentro de scrollEl e as
+  // abinhas de categoria dentro de catsEl. onPick(emoji) decide o que fazer
+  // com o toque. opts.keepFocus: não deixa o clique roubar o foco do campo
+  // de mensagem (bandeja no desktop).
+  function createEmojiPicker(catsEl, scrollEl, onPick, opts) {
+    let built = false;
+    let recentSection = null;
+    let recentGrid = null;
+
+    function fillGrid(grid, emojis) {
+      const frag = document.createDocumentFragment();
+      for (const emoji of emojis) {
+        const btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'emoji-btn';
+        btn.dataset.emoji = emoji;
+        btn.textContent = emoji;
+        frag.appendChild(btn);
+      }
+      grid.replaceChildren(frag);
+    }
+
+    function addCategory(icon, label, emojis) {
+      const section = document.createElement('div');
+      section.className = 'emoji-section';
+      const title = document.createElement('div');
+      title.className = 'emoji-section-title';
+      title.textContent = label;
+      const grid = document.createElement('div');
+      grid.className = 'emoji-grid';
+      fillGrid(grid, emojis);
+      section.appendChild(title);
+      section.appendChild(grid);
+      scrollEl.appendChild(section);
+
+      const tab = document.createElement('button');
+      tab.type = 'button';
+      tab.className = 'emoji-cat';
+      tab.title = label;
+      tab.setAttribute('aria-label', label);
+      tab.textContent = icon;
+      // scrollEl é position:relative (CSS), então offsetTop já é a posição
+      // da seção dentro da área rolável.
+      tab.addEventListener('click', () => { scrollEl.scrollTop = section.offsetTop; });
+      catsEl.appendChild(tab);
+      return { section, grid, tab };
+    }
+
+    function build() {
+      if (built) return;
+      built = true;
+      const recent = addCategory('🕒', 'Recentes', []);
+      recentSection = recent.section;
+      recentGrid = recent.grid;
+      for (const cat of EMOJI_CATEGORIES) {
+        addCategory(cat.icon, cat.label, cat.emojis.split(' '));
+      }
+      scrollEl.addEventListener('click', (e) => {
+        const btn = e.target.closest('.emoji-btn');
+        if (!btn) return;
+        noteRecentEmoji(btn.dataset.emoji);
+        onPick(btn.dataset.emoji);
+      });
+      if (opts && opts.keepFocus) {
+        const keep = (e) => e.preventDefault();
+        scrollEl.addEventListener('mousedown', keep);
+        catsEl.addEventListener('mousedown', keep);
+      }
+    }
+
+    // Chamado a cada abertura: os "Recentes" só são atualizados aqui, nunca
+    // no meio do uso - a grade não pode andar embaixo do dedo.
+    function open() {
+      build();
+      fillGrid(recentGrid, recentEmojis);
+      recentSection.classList.toggle('hidden', recentEmojis.length === 0);
+      catsEl.firstChild.classList.toggle('hidden', recentEmojis.length === 0);
+      scrollEl.scrollTop = 0;
+    }
+
+    return { open };
+  }
+
+  // =====================================================================
+  // Bandeja: Emoji / Figurinhas / GIFs
+  // =====================================================================
+  const tray = document.getElementById('tray');
+  const trayBtn = document.getElementById('tray-btn');
+  const trayTabBtns = Array.from(tray.querySelectorAll('.tray-tab'));
+  const trayPanes = Array.from(tray.querySelectorAll('.tray-pane'));
+  const stickerScroll = document.getElementById('sticker-scroll');
+  const stickerGrid = document.getElementById('sticker-grid');
+  const stickerEmpty = document.getElementById('sticker-empty');
+  const stickerFileInput = document.getElementById('sticker-file-input');
+  const gifScroll = document.getElementById('gif-scroll');
+  const gifGrid = document.getElementById('gif-grid');
+  const gifEmpty = document.getElementById('gif-empty');
+  const gifSentinel = document.getElementById('gif-sentinel');
+  const gifFileInput = document.getElementById('gif-file-input');
+  const gifSearchForm = document.getElementById('gif-search-form');
+  const gifSearchInput = document.getElementById('gif-search-input');
+  const GIF_EMPTY_SAVED_TEXT = gifEmpty.textContent;
+
+  const TRAY_TAB_KEY = 'private-chat:tray-tab';
+  const TRAY_TABS = ['emoji', 'stickers', 'gifs'];
+  let trayTab = TRAY_TABS.includes(localStorage.getItem(TRAY_TAB_KEY))
+    ? localStorage.getItem(TRAY_TAB_KEY)
+    : 'emoji';
+
+  function insertEmojiAtCursor(emoji) {
+    // selectionStart/End sobrevivem ao blur, então isto funciona também no
+    // celular, onde a bandeja fica no lugar do teclado e o campo está sem
+    // foco de propósito.
+    const start = textInput.selectionStart == null ? textInput.value.length : textInput.selectionStart;
+    const end = textInput.selectionEnd == null ? start : textInput.selectionEnd;
+    textInput.setRangeText(emoji, start, end, 'end');
+    syncTextInputUI();
+    pingTyping();
+  }
+
+  const trayEmojiPicker = createEmojiPicker(
+    document.getElementById('tray-emoji-cats'),
+    document.getElementById('tray-emoji-scroll'),
+    insertEmojiAtCursor,
+    { keepFocus: true },
+  );
+
+  function isTrayOpen() {
+    return !tray.classList.contains('hidden');
+  }
+
+  function syncTrayHeightVar() {
+    // O botão flutuante "ir pro fim" sobe junto (ver .scroll-bottom-btn).
+    document.documentElement.style.setProperty('--tray-h', `${isTrayOpen() ? tray.offsetHeight : 0}px`);
+  }
+
+  function showTrayTab(tab) {
+    trayTab = tab;
+    try { localStorage.setItem(TRAY_TAB_KEY, tab); } catch (e) { /* ignora */ }
+    trayTabBtns.forEach((b) => {
+      const active = b.dataset.tab === tab;
+      b.classList.toggle('is-active', active);
+      b.setAttribute('aria-selected', active ? 'true' : 'false');
+    });
+    trayPanes.forEach((p) => p.classList.toggle('hidden', p.dataset.pane !== tab));
+    if (tab === 'emoji') trayEmojiPicker.open();
+    else renderLibrary();
+  }
+
+  function openTray() {
+    if (isTrayOpen()) return;
+    const stick = isNearBottom();
+    // No celular a bandeja toma o lugar do teclado; os dois juntos não
+    // deixariam sobrar conversa nenhuma na tela.
+    if (isTouchPrimary) textInput.blur();
+    tray.classList.remove('hidden');
+    trayBtn.classList.add('is-active');
+    trayBtn.setAttribute('aria-expanded', 'true');
+    showTrayTab(trayTab);
+    syncTrayHeightVar();
+    if (stick) scrollToBottom();
+  }
+
+  function closeTray() {
+    if (!isTrayOpen()) return;
+    tray.classList.add('hidden');
+    trayBtn.classList.remove('is-active');
+    trayBtn.setAttribute('aria-expanded', 'false');
+    syncTrayHeightVar();
+  }
+
+  // mousedown + preventDefault: abrir/fechar a bandeja não tira o foco (nem
+  // o cursor) do campo de mensagem no desktop.
+  trayBtn.addEventListener('mousedown', (e) => e.preventDefault());
+  trayBtn.addEventListener('click', () => (isTrayOpen() ? closeTray() : openTray()));
+  trayTabBtns.forEach((b) => {
+    b.addEventListener('mousedown', (e) => e.preventDefault());
+    b.addEventListener('click', () => showTrayTab(b.dataset.tab));
+  });
+  textInput.addEventListener('focus', () => {
+    if (isTouchPrimary) closeTray();
+  });
+  window.addEventListener('resize', syncTrayHeightVar);
+  if (window.visualViewport) window.visualViewport.addEventListener('resize', syncTrayHeightVar);
+
+  // ---- coleção compartilhada de figurinhas e GIFs ----
+  //
+  // `library` espelha data.stickers do servidor: chega no /api/boot e é
+  // rebuscada quando o SSE avisa "stickers-changed" (o outro lado adicionou
+  // ou removeu algo). Os tiles são guardados por id e REAPROVEITADOS a cada
+  // redesenho - mover um <img> no DOM não rebaixa o arquivo, recriar sim.
+  let library = [];
+  let giphyEnabled = false;
+  const libraryTiles = new Map(); // id do item -> elemento do tile
+
+  function libraryOf(kind) {
+    return library
+      .filter((s) => s.kind === kind)
+      .sort((a, b) => (b.lastUsed || b.ts || 0) - (a.lastUsed || a.ts || 0));
+  }
+
+  const ADD_TILE_SVG =
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>';
+  function makeAddTile(label) {
+    const tile = document.createElement('button');
+    tile.type = 'button';
+    tile.className = 'tray-add-tile';
+    tile.title = label;
+    tile.setAttribute('aria-label', label);
+    tile.innerHTML = ADD_TILE_SVG;
+    return tile;
+  }
+  const stickerAddTile = makeAddTile('Criar figurinha a partir de uma imagem');
+  const gifAddTile = makeAddTile('Adicionar um GIF da galeria');
+
+  function buildLibraryTile(item) {
+    const tile = document.createElement('button');
+    tile.type = 'button';
+    tile.className = item.kind === 'gif' ? 'gif-tile' : 'sticker-tile';
+    tile.dataset.id = item.id;
+    tile.dataset.kind = item.kind;
+    const img = document.createElement('img');
+    img.loading = 'lazy';
+    img.decoding = 'async';
+    img.draggable = false;
+    img.alt = item.kind === 'gif' ? 'GIF' : 'Figurinha';
+    // GIF salvo mostra a miniatura parada (leve); o arquivo animado só é
+    // baixado por quem recebe a mensagem. Figurinha já é pequena.
+    const mediaId = item.kind === 'gif' ? (item.thumbId || item.mediaId) : item.mediaId;
+    img.src = api(`/api/media/${mediaId}`);
+    img.addEventListener('load', () => img.classList.add('is-loaded'));
+    tile.appendChild(img);
+    if (item.kind === 'gif') {
+      const badge = document.createElement('span');
+      badge.className = 'gif-badge';
+      badge.textContent = 'GIF';
+      tile.appendChild(badge);
+    }
+    return tile;
+  }
+
+  function renderLibraryGrid(grid, kind, addTile, emptyEl) {
+    const items = libraryOf(kind);
+    const wanted = new Set(items.map((s) => s.id));
+    for (const [id, tile] of libraryTiles) {
+      if (tile.dataset.kind === kind && !wanted.has(id)) libraryTiles.delete(id);
+    }
+    const nodes = [addTile];
+    for (const item of items) {
+      let tile = libraryTiles.get(item.id);
+      if (!tile) {
+        tile = buildLibraryTile(item);
+        libraryTiles.set(item.id, tile);
+      }
+      nodes.push(tile);
+    }
+    grid.replaceChildren(...nodes);
+    emptyEl.classList.toggle('hidden', items.length > 0);
+  }
+
+  function renderLibrary() {
+    renderLibraryGrid(stickerGrid, 'sticker', stickerAddTile, stickerEmpty);
+    if (gifMode === 'saved') {
+      gifEmpty.textContent = GIF_EMPTY_SAVED_TEXT;
+      renderLibraryGrid(gifGrid, 'gif', gifAddTile, gifEmpty);
+    }
+  }
+
+  function mergeLibraryItem(item) {
+    if (!item || !item.id) return;
+    if (!library.some((s) => s.id === item.id)) library.push(item);
+    renderLibrary();
+  }
+
+  async function refreshLibrary() {
+    try {
+      const res = await fetch(api('/api/stickers'));
+      if (!res.ok) return;
+      const data = await res.json();
+      library = Array.isArray(data.stickers) ? data.stickers : [];
+      renderLibrary();
+    } catch (e) {
+      // sem rede agora: a bandeja fica como estava
+    }
+  }
+
+  // Estado que o servidor entrega logo depois do login, além das mensagens.
+  async function loadBoot() {
+    try {
+      const res = await fetch(api(`/api/boot?name=${encodeURIComponent(myName())}`));
+      if (!res.ok) return;
+      const data = await res.json();
+      if (validQuickReactions(data.quickReactions)) {
+        quickReactions = data.quickReactions;
+        saveLocalQuickReactions();
+      }
+      library = Array.isArray(data.stickers) ? data.stickers : [];
+      giphyEnabled = !!data.giphy;
+      gifSearchForm.classList.toggle('hidden', !giphyEnabled);
+      hermesCfg = data.hermes || null;
+      renderLibrary();
+    } catch (e) {
+      // sem rede: fica com o que o localStorage já tinha
+    }
+  }
+
+  let librarySendBusy = false;
+  async function sendLibraryItem(id) {
+    const sender = myName();
+    if (!sender) {
+      focusNameInput();
+      return;
+    }
+    // Toque duplo ansioso não manda a mesma figurinha duas vezes.
+    if (librarySendBusy) return;
+    librarySendBusy = true;
+    const replyToId = replyingTo ? replyingTo.id : undefined;
+    clearReplyingTo();
+    try {
+      const res = await fetch(api(`/api/stickers/${id}/send`), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sender, replyToId }),
+      });
+      if (!res.ok) toast('Não foi possível enviar.');
+    } catch (e) {
+      toast('Erro de conexão ao enviar.');
+    } finally {
+      setTimeout(() => { librarySendBusy = false; }, 350);
+    }
+  }
+
+  async function removeLibraryItem(id) {
+    try {
+      const res = await fetch(api(`/api/stickers/${id}/delete`), { method: 'POST' });
+      if (!res.ok) throw new Error('remove failed');
+      library = library.filter((s) => s.id !== id);
+      renderLibrary();
+    } catch (e) {
+      toast('Não foi possível remover.');
+    }
+  }
+
+  async function uploadLibraryItem(kind, blob, filename, width, height, thumb) {
+    const form = new FormData();
+    form.append('file', blob, filename);
+    form.append('kind', kind);
+    form.append('sender', myName());
+    if (width && height) {
+      form.append('width', String(width));
+      form.append('height', String(height));
+    }
+    if (thumb) form.append('thumb', thumb, 'thumb.jpg');
+    const res = await fetch(api('/api/stickers'), { method: 'POST', body: form });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.message || 'Não foi possível salvar na coleção.');
+    mergeLibraryItem(data.sticker);
+    return data;
+  }
+
+  function loadImageFromBlob(blob) {
+    return new Promise((resolve, reject) => {
+      const url = URL.createObjectURL(blob);
+      const img = new Image();
+      img.onload = () => {
+        URL.revokeObjectURL(url);
+        resolve(img);
+      };
+      img.onerror = () => {
+        URL.revokeObjectURL(url);
+        reject(new Error('Imagem inválida.'));
+      };
+      img.src = url;
+    });
+  }
+
+  // Transforma uma imagem qualquer numa figurinha: maior lado em 512px
+  // (tamanho padrão de figurinha), mantendo transparência. É isso que deixa
+  // a bandeja leve - uma foto de 4MB vira algo perto de 50KB.
+  //  - GIF/WebP pequeno passa direto, sem redesenhar: pode ser animado, e o
+  //    canvas guardaria só o primeiro quadro.
+  //  - WebP quando o navegador sabe gerar; o Safari não sabe e devolve PNG
+  //    (ótimo pra transparência, pesado pra foto), então foto JPEG sem
+  //    transparência vira JPEG lá.
+  const STICKER_MAX_PX = 512;
+  const STICKER_PASSTHROUGH_BYTES = 1.5 * 1024 * 1024;
+
+  function canvasToBlob(canvas, type, quality) {
+    return new Promise((resolve) => {
+      try {
+        canvas.toBlob((blob) => resolve(blob || null), type, quality);
+      } catch (e) {
+        resolve(null);
+      }
+    });
+  }
+
+  async function imageToSticker(blob) {
+    const img = await loadImageFromBlob(blob);
+    const w = img.naturalWidth;
+    const h = img.naturalHeight;
+    if (!w || !h) throw new Error('Imagem inválida.');
+    if ((blob.type === 'image/gif' || blob.type === 'image/webp') && blob.size <= STICKER_PASSTHROUGH_BYTES) {
+      return { blob, width: w, height: h, filename: blob.type === 'image/gif' ? 'figurinha.gif' : 'figurinha.webp' };
+    }
+    const scale = Math.min(1, STICKER_MAX_PX / Math.max(w, h));
+    const canvas = document.createElement('canvas');
+    canvas.width = Math.max(1, Math.round(w * scale));
+    canvas.height = Math.max(1, Math.round(h * scale));
+    const ctx = canvas.getContext('2d');
+    if (!ctx) throw new Error('Não foi possível preparar a figurinha.');
+    ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
+    let out = await canvasToBlob(canvas, 'image/webp', 0.9);
+    if (out && out.type !== 'image/webp' && blob.type === 'image/jpeg') {
+      out = await canvasToBlob(canvas, 'image/jpeg', 0.88);
+    }
+    if (!out) out = await canvasToBlob(canvas, 'image/png');
+    if (!out) throw new Error('Não foi possível preparar a figurinha.');
+    const ext = out.type === 'image/webp' ? 'webp' : (out.type === 'image/jpeg' ? 'jpg' : 'png');
+    return { blob: out, width: canvas.width, height: canvas.height, filename: `figurinha.${ext}` };
+  }
+
+  async function addStickersFromFiles(files) {
+    if (!files.length) return;
+    if (!myName()) {
+      focusNameInput();
+      return;
+    }
+    let ok = 0;
+    let lastError = '';
+    for (let i = 0; i < files.length; i++) {
+      uploadProgress.textContent = files.length > 1
+        ? `Criando figurinha ${i + 1} de ${files.length}...`
+        : 'Criando figurinha...';
+      uploadProgress.classList.remove('hidden');
+      try {
+        if (!files[i].type.startsWith('image/')) throw new Error('Só imagem vira figurinha.');
+        const st = await imageToSticker(files[i]);
+        await uploadLibraryItem('sticker', st.blob, st.filename, st.width, st.height);
+        ok += 1;
+      } catch (e) {
+        lastError = e.message || '';
+      }
+    }
+    uploadProgress.classList.add('hidden');
+    if (ok < files.length) toast(lastError || 'Algumas figurinhas não puderam ser criadas.');
+  }
+
+  async function addGifsFromFiles(files) {
+    if (!files.length) return;
+    if (!myName()) {
+      focusNameInput();
+      return;
+    }
+    let ok = 0;
+    let lastError = '';
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      uploadProgress.textContent = files.length > 1
+        ? `Salvando GIF ${i + 1} de ${files.length}...`
+        : 'Salvando GIF...';
+      uploadProgress.classList.remove('hidden');
+      try {
+        if (file.type !== 'image/gif' && file.type !== 'image/webp') {
+          throw new Error('Aqui só entra arquivo .gif (ou .webp animado).');
+        }
+        const meta = await readMediaMeta(file);
+        await uploadLibraryItem('gif', file, file.name || 'animacao.gif',
+          meta && meta.width, meta && meta.height, meta && meta.thumb);
+        ok += 1;
+      } catch (e) {
+        lastError = e.message || '';
+      }
+    }
+    uploadProgress.classList.add('hidden');
+    if (ok < files.length) toast(lastError || 'Alguns GIFs não puderam ser salvos.');
+  }
+
+  stickerFileInput.addEventListener('change', () => {
+    const files = Array.from(stickerFileInput.files || []);
+    stickerFileInput.value = '';
+    addStickersFromFiles(files);
+  });
+  gifFileInput.addEventListener('change', () => {
+    const files = Array.from(gifFileInput.files || []);
+    gifFileInput.value = '';
+    addGifsFromFiles(files);
+  });
+
+  // O que o menu de contexto oferece pra guardar ESTA mensagem na coleção
+  // (ou null se não se aplica / já está lá).
+  function collectActionFor(m) {
+    if (m.deleted || m.ephemeral || !m.mediaId) return null;
+    const inLibrary = library.some((s) => s.mediaId === m.mediaId);
+    if (m.type === 'sticker') return inLibrary ? null : { kind: 'keep', label: 'Salvar figurinha' };
+    if (isGifMessage(m)) return inLibrary ? null : { kind: 'keep', label: 'Salvar nos GIFs' };
+    if (m.type === 'image') return { kind: 'make', label: 'Criar figurinha' };
+    return null;
+  }
+
+  async function collectFromMessage(m) {
+    const action = collectActionFor(m);
+    if (!action) return;
+    if (!myName()) {
+      focusNameInput();
+      return;
+    }
+    try {
+      if (action.kind === 'make') {
+        // Foto → figurinha: baixa o original, reduz no canvas e sobe como um
+        // item novo e leve.
+        uploadProgress.textContent = 'Criando figurinha...';
+        uploadProgress.classList.remove('hidden');
+        const res = await fetch(api(`/api/media/${m.mediaId}`));
+        if (!res.ok) throw new Error('Não foi possível abrir a imagem.');
+        const st = await imageToSticker(await res.blob());
+        const out = await uploadLibraryItem('sticker', st.blob, st.filename, st.width, st.height);
+        toast(out.duplicate ? 'Essa figurinha já estava na coleção.' : 'Figurinha criada.');
+      } else {
+        // GIF / figurinha que já está na conversa: o servidor só passa a
+        // apontar pro mesmo arquivo, nada é enviado de novo.
+        const res = await fetch(api('/api/stickers/from-message'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ requesterName: myName(), messageId: m.id }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.message || 'Não foi possível salvar na coleção.');
+        mergeLibraryItem(data.sticker);
+        toast(m.type === 'sticker' ? 'Figurinha salva.' : 'GIF salvo.');
+      }
+    } catch (e) {
+      toast(e.message || 'Não foi possível salvar na coleção.');
+    } finally {
+      uploadProgress.classList.add('hidden');
+    }
+  }
+
+  stickerGrid.addEventListener('click', (e) => {
+    const tile = e.target.closest('button');
+    if (!tile) return;
+    if (tile === stickerAddTile) stickerFileInput.click();
+    else if (tile.dataset.id) sendLibraryItem(tile.dataset.id);
+  });
+
+  // Toque longo / clique direito num item salvo: "Remover da coleção".
+  attachMenuGestures(stickerGrid, stickerScroll, (e) => {
+    const tile = e.target.closest('.sticker-tile');
+    return tile ? { el: tile, id: tile.dataset.id } : null;
+  }, (id, at) => openLibraryMenu(id, at, stickerScroll));
+  attachMenuGestures(gifGrid, gifScroll, (e) => {
+    const tile = e.target.closest('.gif-tile[data-id]');
+    return tile ? { el: tile, id: tile.dataset.id } : null;
+  }, (id, at) => openLibraryMenu(id, at, gifScroll));
+
+  // ---- aba GIFs: salvos + busca no GIPHY (se o servidor tiver a chave) ----
+  //
+  // Sem texto na busca a grade mostra os GIFs salvos; com texto, os
+  // resultados. As prévias vêm por /api/gifs/preview (o servidor repassa),
+  // então este navegador nunca fala com o GIPHY - e a CSP nem deixaria.
+  let gifMode = 'saved'; // 'saved' | 'search'
+  let gifQuery = '';
+  let gifNextOffset = null;
+  let gifLoading = false;
+  let gifSearchTimer = null;
+  let gifSendBusy = false;
+  const gifResults = new Map(); // id do resultado -> dados pra enviar
+
+  async function loadGifPage() {
+    if (gifLoading || gifMode !== 'search' || gifNextOffset === null) return;
+    gifLoading = true;
+    const query = gifQuery;
+    try {
+      const res = await fetch(api(`/api/gifs/search?q=${encodeURIComponent(query)}&offset=${gifNextOffset}`));
+      const data = await res.json().catch(() => ({}));
+      // A pessoa já mudou a busca (ou voltou pros salvos) enquanto esta
+      // página viajava: descarta.
+      if (gifMode !== 'search' || query !== gifQuery) return;
+      if (!res.ok) throw new Error(data.message || 'A busca de GIFs falhou.');
+      const frag = document.createDocumentFragment();
+      for (const item of data.items || []) {
+        if (gifResults.has(item.id)) continue;
+        gifResults.set(item.id, item);
+        const tile = document.createElement('button');
+        tile.type = 'button';
+        tile.className = 'gif-tile gif-result';
+        tile.dataset.result = item.id;
+        tile.title = item.title || 'GIF';
+        const img = document.createElement('img');
+        img.loading = 'lazy';
+        img.decoding = 'async';
+        img.draggable = false;
+        img.alt = item.title || 'GIF';
+        img.src = api(`/api/gifs/preview?u=${encodeURIComponent(item.preview)}`);
+        img.addEventListener('load', () => img.classList.add('is-loaded'));
+        img.addEventListener('error', () => tile.remove());
+        tile.appendChild(img);
+        frag.appendChild(tile);
+      }
+      gifGrid.appendChild(frag);
+      gifNextOffset = data.nextOffset == null ? null : data.nextOffset;
+      if (!gifGrid.children.length) {
+        gifEmpty.textContent = 'Nenhum GIF encontrado pra essa busca.';
+        gifEmpty.classList.remove('hidden');
+      }
+    } catch (e) {
+      gifNextOffset = null;
+      if (gifMode === 'search' && query === gifQuery && !gifGrid.children.length) {
+        gifEmpty.textContent = e.message || 'A busca de GIFs falhou.';
+        gifEmpty.classList.remove('hidden');
+      }
+    } finally {
+      gifLoading = false;
+    }
+  }
+
+  function runGifSearch(raw) {
+    const query = String(raw || '').trim();
+    if (!query) {
+      gifMode = 'saved';
+      gifQuery = '';
+      gifResults.clear();
+      renderLibrary();
+      return;
+    }
+    if (gifMode === 'search' && query === gifQuery) return;
+    gifMode = 'search';
+    gifQuery = query;
+    gifNextOffset = 0;
+    gifResults.clear();
+    gifGrid.replaceChildren();
+    gifEmpty.classList.add('hidden');
+    gifScroll.scrollTop = 0;
+    loadGifPage();
+  }
+
+  gifSearchInput.addEventListener('input', () => {
+    clearTimeout(gifSearchTimer);
+    gifSearchTimer = setTimeout(() => runGifSearch(gifSearchInput.value), 450);
+  });
+  gifSearchForm.addEventListener('submit', (e) => {
+    e.preventDefault();
+    clearTimeout(gifSearchTimer);
+    runGifSearch(gifSearchInput.value);
+  });
+
+  new IntersectionObserver((entries) => {
+    if (entries.some((en) => en.isIntersecting)) loadGifPage();
+  }, { root: gifScroll, rootMargin: '300px 0px' }).observe(gifSentinel);
+
+  async function sendGifResult(item) {
+    const sender = myName();
+    if (!sender) {
+      focusNameInput();
+      return;
+    }
+    if (gifSendBusy) return;
+    gifSendBusy = true;
+    const replyToId = replyingTo ? replyingTo.id : undefined;
+    clearReplyingTo();
+    uploadProgress.textContent = 'Enviando GIF...';
+    uploadProgress.classList.remove('hidden');
+    try {
+      const res = await fetch(api('/api/gifs/send'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sender, replyToId, url: item.url, width: item.width, height: item.height }),
+      });
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        toast(data.message || 'Não foi possível enviar esse GIF.');
+      }
+    } catch (e) {
+      toast('Erro de conexão ao enviar o GIF.');
+    } finally {
+      gifSendBusy = false;
+      uploadProgress.classList.add('hidden');
+    }
+  }
+
+  gifGrid.addEventListener('click', (e) => {
+    const tile = e.target.closest('button');
+    if (!tile) return;
+    if (tile === gifAddTile) gifFileInput.click();
+    else if (tile.dataset.result) sendGifResult(gifResults.get(tile.dataset.result));
+    else if (tile.dataset.id) sendLibraryItem(tile.dataset.id);
+  });
+
+  // =====================================================================
+  // Favoritas
+  //
+  // Cada pessoa tem as suas (como as "mensagens com estrela" do WhatsApp):
+  // favoritar não avisa nem aparece pro outro lado. O servidor guarda em
+  // msg.starredBy; aqui é uma estrelinha ao lado da hora no balão e um
+  // painel de tela cheia com a lista, de onde dá pra pular pra mensagem.
+  // =====================================================================
+  const favBtn = document.getElementById('fav-btn');
+  const favPanel = document.getElementById('fav-panel');
+  const favBack = document.getElementById('fav-back');
+  const favList = document.getElementById('fav-list');
+  const favLoading = document.getElementById('fav-loading');
+  const favEmpty = document.getElementById('fav-empty');
+  const favCount = document.getElementById('fav-count');
+
+  let favItems = [];
+  let favStale = true;   // precisa buscar de novo na próxima abertura
+  let favLoadSeq = 0;
+
+  function isStarredByMe(m) {
+    return Array.isArray(m.starredBy) && m.starredBy.some((n) => sameName(n, myName()));
+  }
+
+  function isFavPanelOpen() {
+    return !favPanel.classList.contains('hidden');
+  }
+
+  // Estrela mudou (SSE "message-starred"): acerta o balão e a lista.
+  function applyStar(id, starredBy) {
+    const row = messagesEl.querySelector(`.msg-row[data-id="${id}"]`);
+    const mine = isStarredByMe({ starredBy });
+    if (row) row.classList.toggle('is-starred', mine);
+    favStale = true;
+    if (isFavPanelOpen()) loadFavs();
+  }
+
+  async function toggleStar(id) {
+    if (!myName()) {
+      focusNameInput();
+      return;
+    }
+    const m = loadedMessages.find((x) => x.id === id);
+    const fav = favItems.find((x) => x.id === id);
+    const starred = !(m ? isStarredByMe(m) : !!fav);
+    try {
+      const res = await fetch(api(`/api/messages/${id}/star`), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requesterName: myName(), starred }),
+      });
+      if (!res.ok) {
+        toast('Não foi possível favoritar essa mensagem.');
+        return;
+      }
+      toast(starred ? 'Adicionada às favoritas.' : 'Removida das favoritas.');
+    } catch (e) {
+      toast('Erro de conexão.');
+    }
+  }
+
+  function fmtFavDate(ts) {
+    const d = new Date(ts);
+    const sameYear = d.getFullYear() === new Date().getFullYear();
+    const day = d.toLocaleDateString('pt-BR', { day: '2-digit', month: 'short', year: sameYear ? undefined : 'numeric' });
+    return `${day} · ${fmtTime(ts)}`;
+  }
+
+  function buildFavItem(m) {
+    const item = document.createElement('div');
+    item.className = 'fav-item';
+    item.dataset.id = m.id;
+    item.tabIndex = 0;
+    item.setAttribute('role', 'button');
+
+    const main = document.createElement('div');
+    main.className = 'fav-main';
+    const meta = document.createElement('div');
+    meta.className = 'fav-meta';
+    const sender = document.createElement('span');
+    sender.className = 'fav-sender';
+    sender.style.color = nameColor(m.sender);
+    sender.textContent = m.sender;
+    const when = document.createElement('span');
+    when.className = 'fav-date';
+    when.textContent = fmtFavDate(m.ts);
+    meta.appendChild(sender);
+    meta.appendChild(when);
+    main.appendChild(meta);
+
+    const body = document.createElement('div');
+    body.className = 'fav-body';
+    const thumbId = replyThumbId(m);
+    if (thumbId) {
+      const img = document.createElement('img');
+      img.className = 'fav-thumb';
+      img.loading = 'lazy';
+      img.decoding = 'async';
+      img.alt = '';
+      img.src = api(`/api/media/${thumbId}`);
+      img.addEventListener('error', () => img.remove());
+      body.appendChild(img);
+    }
+    const text = document.createElement('div');
+    text.className = 'fav-text';
+    if (m.type === 'text') renderRich(text, m.text || '', { links: false });
+    else if (m.type === 'file') text.textContent = `📄 ${m.filename || 'Arquivo'}`;
+    else text.textContent = snippetFor(m);
+    body.appendChild(text);
+    main.appendChild(body);
+    item.appendChild(main);
+
+    const unstar = document.createElement('button');
+    unstar.type = 'button';
+    unstar.className = 'fav-unstar';
+    unstar.title = 'Remover das favoritas';
+    unstar.setAttribute('aria-label', 'Remover das favoritas');
+    unstar.innerHTML =
+      '<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 3.8l2.5 5.2 5.7.8-4.1 4 1 5.7L12 16.8l-5.1 2.7 1-5.7-4.1-4 5.7-.8L12 3.8Z"/></svg>';
+    item.appendChild(unstar);
+    return item;
+  }
+
+  function renderFavs() {
+    const frag = document.createDocumentFragment();
+    for (const m of favItems) frag.appendChild(buildFavItem(m));
+    favList.replaceChildren(frag);
+    favCount.textContent = favItems.length ? String(favItems.length) : '';
+    favEmpty.classList.toggle('hidden', favItems.length > 0 || favStale);
+  }
+
+  async function loadFavs() {
+    const seq = ++favLoadSeq;
+    if (!favItems.length) favLoading.classList.remove('hidden');
+    favEmpty.classList.add('hidden');
+    try {
+      const res = await fetch(api(`/api/starred?name=${encodeURIComponent(myName())}`));
+      if (!res.ok) throw new Error('starred failed');
+      const data = await res.json();
+      if (seq !== favLoadSeq) return; // uma busca mais nova já saiu
+      favItems = data.items || [];
+      favStale = false;
+    } catch (e) {
+      if (seq !== favLoadSeq) return;
+      toast('Não foi possível carregar as favoritas.');
+    } finally {
+      if (seq === favLoadSeq) {
+        favLoading.classList.add('hidden');
+        renderFavs();
+      }
+    }
+  }
+
+  function removeFavItem(id) {
+    const i = favItems.findIndex((x) => x.id === id);
+    if (i === -1) return;
+    favItems.splice(i, 1);
+    renderFavs();
+  }
+
+  function resetFavPanel() {
+    favItems = [];
+    favStale = true;
+    favLoadSeq += 1;
+    favList.replaceChildren();
+    favCount.textContent = '';
+    favEmpty.classList.add('hidden');
+    if (isFavPanelOpen()) loadFavs();
+  }
+
+  function openFavPanel() {
+    favPanel.classList.remove('hidden');
+    if (favStale) loadFavs();
+  }
+
+  function closeFavPanel() {
+    favPanel.classList.add('hidden');
+  }
+
+  favBtn.addEventListener('click', openFavPanel);
+  favBack.addEventListener('click', closeFavPanel);
+  favList.addEventListener('click', (e) => {
+    const item = e.target.closest('.fav-item');
+    if (!item) return;
+    if (e.target.closest('.fav-unstar')) {
+      toggleStar(item.dataset.id);
+      return;
+    }
+    closeFavPanel();
+    jumpToMessage(item.dataset.id);
+  });
+  favList.addEventListener('keydown', (e) => {
+    if (e.key !== 'Enter' || !e.target.classList.contains('fav-item')) return;
+    closeFavPanel();
+    jumpToMessage(e.target.dataset.id);
+  });
+
+  // =====================================================================
+  // Folha de emojis da reação + atalhos personalizáveis
+  //
+  // Aberta pelo "+" da barra de reações. Dois modos:
+  //   - reagir: tocar num emoji reage à mensagem com ele e fecha;
+  //   - "Editar atalhos": tocar num dos 6 atalhos e depois num emoji troca
+  //     aquele atalho. Fica salvo no servidor por nome (e no localStorage).
+  // =====================================================================
+  const emojiSheet = document.getElementById('emoji-sheet');
+  const emojiSheetTitle = document.getElementById('emoji-sheet-title');
+  const emojiSheetEditBtn = document.getElementById('emoji-sheet-edit');
+  const emojiSheetCloseBtn = document.getElementById('emoji-sheet-close');
+  const quickEditEl = document.getElementById('quick-edit');
+  const quickSlotsEl = document.getElementById('quick-slots');
+  const quickResetBtn = document.getElementById('quick-reset');
+  const emojiAnyInput = document.getElementById('emoji-any-input');
+
+  let sheetMsgId = null;
+  let sheetEditing = false;
+  let sheetSlot = -1;
+
+  function saveLocalQuickReactions() {
+    try {
+      localStorage.setItem(QUICK_REACTIONS_KEY, JSON.stringify(quickReactions));
+    } catch (e) { /* ignora */ }
+  }
+
+  async function saveQuickReactions() {
+    saveLocalQuickReactions();
+    if (!myName()) return;
+    try {
+      const res = await fetch(api('/api/prefs'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ requesterName: myName(), quickReactions }),
+      });
+      if (!res.ok) throw new Error('prefs failed');
+    } catch (e) {
+      toast('Atalhos salvos só neste aparelho (sem conexão agora).');
+    }
+  }
+
+  function renderQuickSlots() {
+    quickSlotsEl.replaceChildren();
+    quickReactions.forEach((emoji, i) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = `quick-slot${i === sheetSlot ? ' is-selected' : ''}`;
+      btn.dataset.slot = String(i);
+      btn.setAttribute('aria-label', `Atalho ${i + 1}: ${emoji}`);
+      btn.textContent = emoji;
+      quickSlotsEl.appendChild(btn);
+    });
+  }
+
+  function setSheetEditing(editing) {
+    sheetEditing = editing;
+    sheetSlot = -1;
+    emojiSheetTitle.textContent = editing ? 'Atalhos de reação' : 'Reagir';
+    emojiSheetEditBtn.textContent = editing ? 'Concluir' : 'Editar atalhos';
+    quickEditEl.classList.toggle('hidden', !editing);
+    if (editing) renderQuickSlots();
+  }
+
+  function onSheetEmoji(emoji) {
+    if (!isSingleEmoji(emoji)) return;
+    if (!sheetEditing) {
+      const id = sheetMsgId;
+      closeEmojiSheet();
+      if (id) sendReaction(id, emoji);
+      return;
+    }
+    if (sheetSlot < 0) {
+      toast('Toque primeiro no atalho que você quer trocar.');
+      return;
+    }
+    // Emoji que já é outro atalho troca de lugar com este, em vez de ficar
+    // repetido na barra.
+    const other = quickReactions.indexOf(emoji);
+    const next = quickReactions.slice();
+    if (other !== -1 && other !== sheetSlot) next[other] = next[sheetSlot];
+    next[sheetSlot] = emoji;
+    quickReactions = next;
+    sheetSlot = -1;
+    renderQuickSlots();
+    renderReactionPicks();
+    saveQuickReactions();
+  }
+
+  const sheetEmojiPicker = createEmojiPicker(
+    document.getElementById('sheet-emoji-cats'),
+    document.getElementById('sheet-emoji-scroll'),
+    onSheetEmoji,
+  );
+
+  function isEmojiSheetOpen() {
+    return !emojiSheet.classList.contains('hidden');
+  }
+
+  function openEmojiSheet(msgId) {
+    sheetMsgId = msgId;
+    setSheetEditing(false);
+    emojiAnyInput.value = '';
+    emojiSheet.classList.remove('hidden');
+    sheetEmojiPicker.open();
+  }
+
+  function closeEmojiSheet() {
+    if (!isEmojiSheetOpen()) return;
+    emojiSheet.classList.add('hidden');
+    sheetMsgId = null;
+    emojiAnyInput.blur();
+  }
+
+  emojiSheetCloseBtn.addEventListener('click', closeEmojiSheet);
+  emojiSheet.addEventListener('click', (e) => {
+    if (e.target === emojiSheet) closeEmojiSheet();
+  });
+  emojiSheetEditBtn.addEventListener('click', () => setSheetEditing(!sheetEditing));
+  quickSlotsEl.addEventListener('click', (e) => {
+    const btn = e.target.closest('.quick-slot');
+    if (!btn) return;
+    const slot = parseInt(btn.dataset.slot, 10);
+    sheetSlot = sheetSlot === slot ? -1 : slot;
+    renderQuickSlots();
+  });
+  quickResetBtn.addEventListener('click', () => {
+    quickReactions = DEFAULT_QUICK_REACTIONS.slice();
+    sheetSlot = -1;
+    renderQuickSlots();
+    renderReactionPicks();
+    saveQuickReactions();
+  });
+  // Campo livre: o teclado de emoji do próprio aparelho alcança qualquer
+  // emoji que não esteja na grade. Vale o primeiro emoji digitado.
+  emojiAnyInput.addEventListener('input', () => {
+    const found = graphemes(emojiAnyInput.value).find(isSingleEmoji);
+    if (!found) return;
+    emojiAnyInput.value = '';
+    noteRecentEmoji(found);
+    onSheetEmoji(found);
   });
 
   exportBtn.addEventListener('click', () => {

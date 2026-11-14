@@ -35,10 +35,36 @@ projeto foi pensado pra impedir o uso casual por quem usa o Mac no dia a dia
 (família, outro usuário da máquina, etc.), não pra resistir a um atacante
 sofisticado com acesso total ao sistema.
 
+## O que dá pra fazer no chat
+
+- **Texto com formatação**, igual ao WhatsApp: `*negrito*` (ou `**negrito**`),
+  `_itálico_`, `~riscado~` (ou `~~riscado~~`), `` `código` ``. No computador,
+  Ctrl/Cmd+B, +I e +Shift+X aplicam na seleção.
+- **Reações** com qualquer emoji: segure (ou clique com o botão direito) numa
+  mensagem. Os 6 atalhos da barra são seus — toque no **+** → *Editar atalhos*.
+- **Favoritas**: segure a mensagem → *Favoritar*. A lista fica na ⭐ do topo e
+  é só sua; a outra pessoa não vê o que você favoritou.
+- **Figurinhas e GIFs**: o botão 🙂 dentro do campo de mensagem abre a bandeja.
+  O **+** cria figurinha a partir de qualquer imagem; segurar uma foto na
+  conversa também oferece *Criar figurinha*, e um GIF, *Salvar nos GIFs*. A
+  coleção é compartilhada pelos dois e fica cifrada no Mac como todo o resto.
+- **Colar imagem**: Ctrl/Cmd+V com uma imagem ou GIF copiado envia direto.
+- Foto, vídeo, áudio, visualização única, respostas e a aba de mídia.
+
+### Opcionais (variáveis no `.env`)
+
+Nenhum destes vem ligado. Cada um só existe se a variável estiver no `.env`
+(depois de mexer nele, reinicie o servidor):
+
+| Variável | O que liga |
+| --- | --- |
+| `GIPHY_API_KEY` | Busca de GIFs na aba GIFs. Crie uma chave grátis em https://developers.giphy.com. A busca, as prévias e o GIF escolhido passam pelo seu Mac — o navegador de quem está no chat nunca fala com o GIPHY. O que **sai** é o texto buscado, do IP do Mac pro GIPHY. |
+| `HERMES_TRIGGER` | Frase que, digitada no campo de mensagem, abre um portal local em vez de ser enviada. |
+
 ## Exportar backup
 
-O botão ⬇ no topo do chat baixa um `.zip` com `conversa.json`, `conversa.txt`
-e todas as mídias em `midias/`. Esse arquivo exportado **sai descriptografado**
+O botão ⬇ no topo do chat baixa um `.zip` com `conversa.json`, `conversa.txt`,
+todas as mídias em `midias/` e a coleção de figurinhas/GIFs em `colecao/`. Esse arquivo exportado **sai descriptografado**
 — é assim que vira algo legível/portável. Guarde-o num lugar seguro (ou apague
 depois de mover) já que, diferente do que fica em `data/`, ele não está mais
 protegido pelo código de acesso.

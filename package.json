@@ -6,7 +6,8 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "start:lan": "HOST=0.0.0.0 node server.js"
+    "start:lan": "HOST=0.0.0.0 node server.js",
+    "test": "node test/smoke.js"
   },
   "dependencies": {
     "express": "^4.19.2",
