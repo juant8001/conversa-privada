@@ -105,6 +105,8 @@ async function main() {
     EPHEMERAL_TTL_MS: '300',
     ALT_CODE: 'codigo-alternativo',
     HERMES_TRIGGER: 'abre-te-sesamo',
+    HERMES_CODE: 'entrada-do-hermes-teste',
+    HERMES_BIN: '/bin/echo', // "agente" de mentira: devolve o próprio prompt
     GIPHY_API_KEY: 'chave-de-teste',
     GIPHY_API_BASE: `http://127.0.0.1:${giphy.address().port}`,
   };
@@ -227,6 +229,10 @@ async function main() {
     check('foto abre inline', (r.res.headers.get('content-disposition') || '').startsWith('inline'));
     r = await juan('GET', `/api/media/${photo.thumbId}`, undefined, { raw: true });
     check('miniatura sai como jpeg', r.res.headers.get('content-type') === 'image/jpeg');
+    await juan('POST', `/api/messages/${photo.id}/star`, { requesterName: 'Juan', starred: true });
+    r = await juan('GET', '/api/media-list');
+    check('aba Mídia informa o que está favoritado', r.json.items.find((it) => it.id === photo.id).starredBy[0] === 'Juan');
+    await juan('POST', `/api/messages/${photo.id}/star`, { requesterName: 'Juan', starred: false });
     r = await juan('GET', `/api/media/${photo.mediaId}`, undefined, { raw: true, headers: { Range: 'bytes=0-1' } });
     check('Range continua funcionando', r.res.status === 206 && r.buf.length === 2);
     r = await juan('POST', '/api/media', form({ sender: 'Juan', file: { buffer: Buffer.from('<script>alert(1)</script>'), type: 'text/html', name: 'x.html' } }));
@@ -334,6 +340,39 @@ async function main() {
     check('mídia da conversa foi apagada', r.res.status === 404);
     const left = fs.readdirSync(path.join(DATA_DIR, 'media'));
     check('sobrou no disco só o arquivo da coleção', left.length === 1, left);
+
+    console.log('\n# entrada direta do Hermes');
+    const guest = makeClient();
+    r = await anon('POST', '/api/hermes', { text: 'oi' });
+    check('Hermes sem sessão nenhuma = 401', r.res.status === 401);
+    r = await guest('POST', '/api/login', { code: env.HERMES_CODE });
+    check('código do Hermes na entrada abre só o Hermes', r.res.status === 200 && r.json.hermes === true && !r.json.notice);
+    r = await guest('GET', '/api/me');
+    check('…sem autenticar no chat', r.json.authenticated === false && r.json.hermes === true);
+    for (const [method, route] of [['GET', '/api/messages'], ['GET', '/api/boot?name=x'], ['GET', '/api/stickers'],
+      ['GET', '/api/starred?name=x'], ['GET', '/api/media-list'], ['GET', '/api/export'], ['GET', '/api/stream'],
+      ['GET', '/api/gifs/search?q=a'], ['POST', '/api/typing'], ['POST', '/api/clear'], ['POST', '/api/messages']]) {
+      r = await guest(method, route, method === 'POST' ? { sender: 'x', text: 'x', name: 'x' } : undefined, { raw: true });
+      check(`sessão do Hermes não abre ${method} ${route}`, r.res.status === 401, r.res.status);
+    }
+    r = await guest('POST', '/api/hermes', { text: 'oi hermes', history: [] });
+    check('conversa com o Hermes responde', r.res.status === 200 && r.json.ok && r.json.reply.includes('oi hermes'), r.json);
+    r = await juan('POST', '/api/hermes', { text: 'de dentro do chat' });
+    check('caminho antigo (dentro do chat) continua valendo', r.res.status === 200 && r.json.ok);
+    r = await guest('POST', '/api/logout');
+    r = await guest('POST', '/api/hermes', { text: 'oi' });
+    check('sair encerra a sessão do Hermes', r.res.status === 401);
+
+    // Por último de propósito: isto bloqueia o IP de teste por 10 minutos.
+    const brute = makeClient();
+    for (let i = 0; i < 5; i++) await brute('POST', '/api/login', { code: `errado-${i}` });
+    r = await brute('POST', '/api/login', { code: env.HERMES_CODE });
+    check('código do Hermes ainda entra antes do bloqueio', r.json && r.json.hermes === true);
+    r = await brute('POST', '/api/login', { code: 'errado-6' });
+    r = await brute('POST', '/api/login', { code: CODE });
+    check('entrar no Hermes não zera o contador de erros do chat', r.res.status === 429, r.res.status);
+    r = await brute('POST', '/api/login', { code: env.HERMES_CODE });
+    check('com o IP bloqueado, o código do Hermes também não entra', r.res.status === 429);
 
     check('servidor sem erro no stderr', serverErr.trim() === '', serverErr.slice(0, 400));
   } finally {

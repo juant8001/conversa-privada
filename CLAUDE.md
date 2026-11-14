@@ -34,9 +34,9 @@ Useful env vars: `PORT`, `ROOM_SLUG`, `DATA_DIR`, `MAX_UPLOAD_MB` (default 300),
 cookies work over plain-HTTP localhost).
 
 Optional features, each **off unless its variable is set** (the repo is public,
-so none of these values may ever be hardcoded): `HERMES_TRIGGER`
-(+ `HERMES_BIN`) for the Hermes portal, `GIPHY_API_KEY` (+ `GIPHY_RATING`,
-default `r`) for GIF search.
+so none of these values may ever be hardcoded): `HERMES_CODE` and/or
+`HERMES_TRIGGER` (+ `HERMES_BIN`) for the Hermes portal, `GIPHY_API_KEY`
+(+ `GIPHY_RATING`, default `r`) for GIF search.
 
 ## Architecture
 
@@ -227,6 +227,22 @@ panel; and `.media-tile` needs `-webkit-touch-callout: none` (like
 `.bubble img` already had) or iOS pops the native "Salvar imagem" sheet over
 our menu.
 
+### Hermes portal
+
+A full-screen chat with the local Hermes Agent (`POST /api/hermes` runs
+`hermes --oneshot` with only the `memory` toolset, one request at a time).
+Nothing is stored or broadcast. Two independent ways in:
+
+- `HERMES_CODE`: typed on the **login screen** instead of the chat code. It
+  creates a separate in-memory session (`hermesGuests`, own `pc_hermes`
+  cookie, no store key) that is accepted by `/api/hermes` and **nothing
+  else** — every chat route goes through `requireAuth`, which only knows
+  `auth` sessions. It is checked after the rate-limit lock and deliberately
+  does not call `registerSuccess` (otherwise it could be used to reset the
+  failure counter while guessing the chat code).
+- `HERMES_TRIGGER`: typed in the composer by someone already in the chat;
+  the client only ever gets a salted hash of it from `/api/boot`.
+
 ### Rate limiting
 
 `lib/auth.js`: 6 wrong codes from an IP → 10-minute lock (`isLocked` /
@@ -285,8 +301,9 @@ flag.
 
 - **Favoritas**: `msg.starredBy` (array of names) — per person, never shown to
   the other side. `POST /api/messages/:id/star`, `GET /api/starred?name=`.
-  Client: `.msg-row.is-starred` (star next to the time) and `#fav-panel`.
-  Deleted and view-once messages can't be starred.
+  Client: `.msg-row.is-starred` (star next to the time), `#fav-panel`, and
+  the media tab (tile menu + `.media-tile.is-starred`; `/api/media-list`
+  returns `starredBy`). Deleted and view-once messages can't be starred.
 - **Reações**: any single emoji (`isSingleEmoji` on both sides). The six
   shortcuts in the context menu are per person, stored in `data.prefs` under
   `prefsKey(name)` (`POST /api/prefs`, returned by `GET /api/boot`) and

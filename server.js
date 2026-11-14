@@ -81,6 +81,15 @@ const GIF_PREVIEW_MAX_BYTES = 6 * 1024 * 1024;
 // repositório é público). Sem a variável, o recurso fica desligado.
 const ALT_CODE = process.env.ALT_CODE || '';
 const HERMES_TRIGGER = process.env.HERMES_TRIGGER || '';
+// Código de entrada do Hermes: digitado na tela de entrada NO LUGAR do código
+// do chat, abre uma conversa direta com o Hermes Agent deste Mac - sem abrir
+// o chat. Quem entra assim ganha uma sessão à parte (cookie próprio, sem a
+// chave da conversa) que só serve pra rota /api/hermes: nenhuma rota do chat
+// aceita essa sessão. Menos de 8 caracteres = desligado.
+const HERMES_CODE = (process.env.HERMES_CODE || '').length >= 8 ? process.env.HERMES_CODE : '';
+const HERMES_COOKIE = 'pc_hermes';
+const HERMES_SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+const hermesGuests = new Map(); // token -> criado em (só em memória, some no restart)
 // O cliente compara o que foi digitado com este hash (sal novo a cada
 // start do processo), então o gatilho em si nunca viaja pro navegador.
 const HERMES_SALT = crypto.randomBytes(16).toString('hex');
@@ -526,9 +535,42 @@ roomRouter.get('/', (req, res) => {
   if (!sendStatic(req, res, 'index.html')) res.status(404).end();
 });
 
+function readCookie(req, name) {
+  const header = req.headers.cookie;
+  if (!header) return null;
+  for (const part of header.split(';')) {
+    const i = part.indexOf('=');
+    if (i === -1 || part.slice(0, i).trim() !== name) continue;
+    try {
+      return decodeURIComponent(part.slice(i + 1).trim());
+    } catch (e) {
+      return null;
+    }
+  }
+  return null;
+}
+
+function hermesCookie(value, maxAgeSeconds) {
+  const secure = process.env.COOKIE_INSECURE === '1' ? '' : '; Secure';
+  return `${HERMES_COOKIE}=${value}; Path=${ROOM_PATH}; HttpOnly; SameSite=Strict; Max-Age=${maxAgeSeconds}${secure}`;
+}
+
+// Devolve o token da sessão "só Hermes" deste request, ou null.
+function getHermesGuest(req) {
+  const token = readCookie(req, HERMES_COOKIE);
+  if (!token || !/^[0-9a-f]{64}$/.test(token)) return null;
+  const createdAt = hermesGuests.get(token);
+  if (!createdAt) return null;
+  if (Date.now() - createdAt > HERMES_SESSION_TTL_MS) {
+    hermesGuests.delete(token);
+    return null;
+  }
+  return token;
+}
+
 roomRouter.get('/api/me', (req, res) => {
   const session = auth.getSession(req);
-  res.json({ authenticated: !!session });
+  res.json({ authenticated: !!session, hermes: !session && !!getHermesGuest(req) });
 });
 
 roomRouter.post('/api/login', express.json(), async (req, res) => {
@@ -541,6 +583,20 @@ roomRouter.post('/api/login', express.json(), async (req, res) => {
   }
   if (typeof code !== 'string' || code.length < 4 || code.length > 256) {
     return res.status(400).json({ error: 'invalid', message: 'Codigo muito curto.' });
+  }
+  // Código do Hermes: depois do bloqueio por tentativas (então adivinhar este
+  // código também esbarra no limite) e SEM registerSuccess - senão quem
+  // conhece este código poderia usá-lo pra zerar o contador de erros e
+  // continuar chutando o código do chat.
+  if (HERMES_CODE && safeEqual(code, HERMES_CODE)) {
+    const now = Date.now();
+    for (const [t, createdAt] of hermesGuests) {
+      if (now - createdAt > HERMES_SESSION_TTL_MS) hermesGuests.delete(t);
+    }
+    const token = crypto.randomBytes(32).toString('hex');
+    hermesGuests.set(token, now);
+    res.setHeader('Set-Cookie', hermesCookie(token, Math.floor(HERMES_SESSION_TTL_MS / 1000)));
+    return res.json({ ok: true, hermes: true });
   }
   try {
     const { key } = await store.unlock(code);
@@ -559,6 +615,9 @@ roomRouter.post('/api/login', express.json(), async (req, res) => {
 
 roomRouter.post('/api/logout', (req, res) => {
   auth.destroySession(req, res, ROOM_PATH);
+  const guest = getHermesGuest(req);
+  if (guest) hermesGuests.delete(guest);
+  res.append('Set-Cookie', hermesCookie('', 0));
   res.json({ ok: true });
 });
 
@@ -1432,17 +1491,33 @@ roomRouter.post('/api/gifs/send', requireAuth, express.json(), async (req, res) 
   }
 });
 
-// ===== Portal secreto "Hermes": conversa de verdade com o Hermes Agent =====
-// Só a tela cheia secreta do app.js chama isto (gatilho por senha; nunca vira
-// mensagem do chat). Roda o agente local em modo one-shot, conversacional - só
-// o toolset "memory", sem terminal/browser/redes sociais - e devolve a resposta.
-// Nada aqui é salvo no histórico da conversa nem transmitido pro outro lado.
-// Só existe se HERMES_TRIGGER estiver no .env (ver /api/boot).
-roomRouter.post('/api/hermes', requireAuth, express.json(), (req, res) => {
-  if (!HERMES_TRIGGER) return res.status(404).end();
+// ===== Portal "Hermes": conversa de verdade com o Hermes Agent =====
+// Só a tela cheia do portal no app.js chama isto. Roda o agente local em modo
+// one-shot, conversacional - só o toolset "memory", sem terminal/browser/redes
+// sociais - e devolve a resposta. Nada aqui é salvo no histórico da conversa
+// nem transmitido pro outro lado.
+// Dois jeitos de chegar aqui, cada um com a sua variável no .env:
+//  - HERMES_CODE: sessão "só Hermes", de quem digitou esse código na tela de
+//    entrada (ver /api/login);
+//  - HERMES_TRIGGER: alguém já dentro do chat que digitou a frase no campo de
+//    mensagem (ver /api/boot).
+function requireHermesAccess(req, res, next) {
+  if (getHermesGuest(req)) return next();
+  if (HERMES_TRIGGER && auth.getSession(req)) return next();
+  return res.status(401).json({ ok: false, error: 'unauthenticated' });
+}
+
+// Um pedido por vez: é um modelo local, e dois de uma vez só fariam os dois
+// demorarem (ou estourarem o tempo).
+let hermesRunning = false;
+
+roomRouter.post('/api/hermes', requireHermesAccess, express.json(), (req, res) => {
   const { execFile } = require('child_process');
-  const text = (req.body && req.body.text ? String(req.body.text) : '').trim();
+  const text = (req.body && req.body.text ? String(req.body.text) : '').trim().slice(0, 4000);
   if (!text) return res.status(400).json({ ok: false, error: 'invalid' });
+  if (hermesRunning) {
+    return res.status(429).json({ ok: false, message: 'O Hermes ainda está respondendo. Tente de novo em instantes.' });
+  }
   const history = Array.isArray(req.body && req.body.history) ? req.body.history : [];
 
   const HERMES_BIN = process.env.HERMES_BIN
@@ -1466,7 +1541,9 @@ roomRouter.post('/api/hermes', requireAuth, express.json(), (req, res) => {
   prompt += `Juan: ${text}`;
 
   const args = ['--oneshot', prompt, '--toolsets', 'memory'];
+  hermesRunning = true;
   execFile(HERMES_BIN, args, { timeout: 120000, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+    hermesRunning = false;
     const reply = (stdout || '').trim();
     if (reply) return res.json({ ok: true, reply });
     if (err && err.killed) {
@@ -1626,6 +1703,9 @@ roomRouter.get('/api/media-list', requireAuth, (req, res) => {
         sender: m.sender,
         ts: m.ts,
         filename: m.filename,
+        // Pra grade marcar com estrela (e o menu do tile dizer "Desfavoritar")
+        // o que esta pessoa já favoritou.
+        starredBy: m.starredBy,
       });
     }
 

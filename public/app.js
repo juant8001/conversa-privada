@@ -481,9 +481,9 @@
     showMenu(id, 'chat', at, messagesEl);
   }
 
-  // Menu de um tile da aba Mídia. Por enquanto uma ação só: as outras ou não
-  // fazem sentido numa grade (Copiar) ou pedem uma confirmação destrutiva que
-  // não combina com o gesto rápido daqui (Apagar).
+  // Menu de um tile da aba Mídia: Ir para a mensagem e Favoritar. As outras
+  // ações ou não fazem sentido numa grade (Copiar) ou pedem uma confirmação
+  // destrutiva que não combina com o gesto rápido daqui (Apagar).
   function openMediaTileMenu(item, at) {
     if (!item) return;
     if (activeMenuMsgId === item.id) return;
@@ -494,7 +494,8 @@
     msgMenuSelectBtn.classList.add('hidden');
     msgMenuDelBtn.classList.add('hidden');
     msgMenuReactions.classList.add('hidden');
-    msgMenuStarBtn.classList.add('hidden');
+    msgMenuStarBtn.classList.remove('hidden');
+    msgMenuStarLabel.textContent = isStarredByMe(item) ? 'Desfavoritar' : 'Favoritar';
     msgMenuStickerBtn.classList.add('hidden');
     msgMenuRemoveBtn.classList.add('hidden');
 
@@ -2061,7 +2062,7 @@
   function buildMediaTile(item) {
     const tile = document.createElement('button');
     tile.type = 'button';
-    tile.className = 'media-tile';
+    tile.className = `media-tile${isStarredByMe(item) ? ' is-starred' : ''}`;
     tile.dataset.id = item.id;
     // O tile é sempre quadrado (aspect-ratio no CSS) e a imagem é cortada
     // com object-fit: cover. Respeitar a proporção de cada mídia deixaria
@@ -2285,7 +2286,7 @@
     const item = {
       id: m.id, type: m.type, mediaId: m.mediaId, thumbId: m.thumbId,
       width: m.width, height: m.height, sender: m.sender, ts: m.ts,
-      filename: m.filename,
+      filename: m.filename, starredBy: m.starredBy,
     };
     mediaItems.unshift(item);
 
@@ -2757,8 +2758,9 @@
 
   async function checkAuth() {
     const res = await fetch(api('/api/me'));
-    const { authenticated } = await res.json();
+    const { authenticated, hermes } = await res.json();
     if (authenticated) showChat();
+    else if (hermes) showHermesOnly();
     else showLogin();
   }
 
@@ -2854,7 +2856,10 @@
         body: JSON.stringify({ code }),
       });
       const data = await res.json();
-      if (res.ok && data.ok && data.notice) {
+      if (res.ok && data.ok && data.hermes) {
+        codeInput.value = '';
+        showHermesOnly();
+      } else if (res.ok && data.ok && data.notice) {
         codeInput.value = '';
         showNotice();
       } else if (res.ok && data.ok) {
@@ -3023,9 +3028,35 @@
       hermesComposer.requestSubmit();
     });
   }
-  if (hermesExitBtn) hermesExitBtn.addEventListener('click', closeHermesPortal);
+  // Entrada direta: quem digitou o código do Hermes na tela de entrada (em
+  // vez do código do chat) cai aqui. Nenhuma tela do chat é mostrada e
+  // nenhuma chamada do chat é feita - a sessão desse caminho só serve pra
+  // /api/hermes. Sair (X ou Esc) encerra essa sessão e volta pra entrada.
+  let hermesStandalone = false;
+  function showHermesOnly() {
+    loginScreen.classList.add('hidden');
+    chatScreen.classList.add('hidden');
+    noticeScreen.classList.add('hidden');
+    nameScreen.classList.add('hidden');
+    closeMediaPanel();
+    hermesStandalone = true;
+    openHermesPortal();
+  }
+
+  async function exitHermesPortal() {
+    const standalone = hermesStandalone;
+    hermesStandalone = false;
+    closeHermesPortal();
+    if (!standalone) return;
+    try {
+      await fetch(api('/api/logout'), { method: 'POST' });
+    } catch (e) { /* sem rede: a sessão expira sozinha */ }
+    showLogin();
+  }
+
+  if (hermesExitBtn) hermesExitBtn.addEventListener('click', exitHermesPortal);
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && hermesOpen) closeHermesPortal();
+    if (e.key === 'Escape' && hermesOpen) exitHermesPortal();
   });
 
   composer.addEventListener('submit', async (e) => {
@@ -4496,6 +4527,11 @@
     const row = messagesEl.querySelector(`.msg-row[data-id="${id}"]`);
     const mine = isStarredByMe({ starredBy });
     if (row) row.classList.toggle('is-starred', mine);
+    // A mesma mensagem pode estar na grade da aba Mídia.
+    const mediaItem = mediaItems.find((it) => it.id === id);
+    if (mediaItem) mediaItem.starredBy = starredBy;
+    const tile = mediaGrid.querySelector(`.media-tile[data-id="${id}"]`);
+    if (tile) tile.classList.toggle('is-starred', mine);
     favStale = true;
     if (isFavPanelOpen()) loadFavs();
   }
@@ -4505,7 +4541,9 @@
       focusNameInput();
       return;
     }
-    const m = loadedMessages.find((x) => x.id === id);
+    // A mensagem pode não estar no lote carregado do chat (vinda da aba
+    // Mídia ou do painel de favoritas): procura o estado atual nos três.
+    const m = loadedMessages.find((x) => x.id === id) || mediaItems.find((x) => x.id === id);
     const fav = favItems.find((x) => x.id === id);
     const starred = !(m ? isStarredByMe(m) : !!fav);
     try {
