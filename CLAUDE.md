@@ -366,15 +366,26 @@ flag.
   and decrypted (HKDF "WhatsApp Image Keys", AES-CBC + 10-byte HMAC). Every
   file must hash to the favorite's sha256. Read-only through `/usr/bin/sqlite3
   -readonly`. In practice the signed download URLs expire after a few months,
-  so old favorites the Mac never cached come back as `missing` — the client
-  tells the person to open the favorites in WhatsApp for Mac and import again.
-  `POST /api/stickers/import-whatsapp {offset}` works in batches of 25
-  (`nextOffset`), dedupes by file hash (`item.hash`), `ts = now - order` keeps
+  so old favorites the Mac never cached come back as `missing`.
+  **Pick, then import, once** (v47): `scan()` loads every favorite's file
+  (8 downloads in parallel) and caches the verified bytes for 10 min or until
+  the WhatsApp DBs change. `GET /api/stickers/whatsapp-favorites` lists them
+  (`key` = sha256 hex, `inLibrary`, plus `missing`), `GET .../:key` serves the
+  preview from that same cache (`MEDIA_CSP`), and `POST
+  /api/stickers/import-whatsapp {keys: [≤25], final}` imports only the chosen
+  keys; the batch with `final: true` writes `data.waImportDone = {at, by}` in
+  the encrypted store. From then on `waImport` is false in `/api/boot` and
+  `/api/stickers` (button gone for both people), the list answers 410, the
+  previews 404 and the import 409. "Limpar conversa" preserves
+  `waImportDone`. To allow it again, someone would have to delete that key
+  from the store (no UI for it, on purpose). `ts = now - order` keeps
   WhatsApp's order in the tray.
 - **Client** (aba Figurinhas): `#sticker-search-form` — plain text searches
   GIPHY stickers (`stickerMode = 'search'`, tapping a result *creates* the
   sticker in the library, it doesn't send), a link shows "Criar".
-  `#wa-import-btn` loops the batches with progress in `#upload-progress`.
+  `#wa-import-btn` opens `#wa-panel` (full-screen, `.media-panel` skeleton):
+  tiles to tick, "Todas/Nenhuma", footer button "Importar N figurinhas" →
+  `askConfirm` (says it's one time only) → batches of 25, last one `final`.
   The "+" accepts `image/*,video/*`; video and GIF go to `/convert` when the
   server has the tools.
 

@@ -1142,7 +1142,7 @@ roomRouter.get('/api/boot', requireAuth, (req, res) => {
       stickers: (data.stickers || []).map(publicSticker),
       giphy: !!GIPHY_API_KEY,
       stickerTools: stickerTools.available(),
-      waImport: waFavorites.enabled(),
+      waImport: waImportOpen(data),
       hermes: HERMES_HASH ? { salt: HERMES_SALT, hash: HERMES_HASH } : null,
     });
   } catch (e) {
@@ -1171,7 +1171,7 @@ function addLibraryItem(data, item) {
 roomRouter.get('/api/stickers', requireAuth, (req, res) => {
   try {
     const data = loadWithSessionKey(req);
-    res.json({ stickers: (data.stickers || []).map(publicSticker) });
+    res.json({ stickers: (data.stickers || []).map(publicSticker), waImport: waImportOpen(data) });
   } catch (e) {
     res.status(401).json({ error: 'unauthenticated' });
   }
@@ -1472,42 +1472,98 @@ roomRouter.post('/api/stickers/from-link', requireAuth, (req, res) => {
   }, sender, extra);
 });
 
-// Favoritas do WhatsApp deste Mac (só com WHATSAPP_IMPORT=1). Vai em lotes:
-// o celular pede de 25 em 25 e mostra o progresso, em vez de uma requisição
-// só que estoura o tempo do túnel. Repetir é seguro: o que já está na coleção
-// (mesmo arquivo) não entra de novo.
+// Favoritas do WhatsApp deste Mac (só com WHATSAPP_IMPORT=1). A pessoa vê
+// as favoritas numa tela, escolhe quais quer e importa - UMA vez só: depois
+// disso data.waImportDone fica gravado na conversa (cifrado como o resto) e o
+// botão some pros dois. As prévias saem da mesma varredura que a importação
+// usa (lib/whatsapp-favorites.js, scan), então o que se vê é o que entra.
+function waImportOpen(data) {
+  return waFavorites.enabled() && !(data && data.waImportDone);
+}
+
+roomRouter.get('/api/stickers/whatsapp-favorites', requireAuth, async (req, res) => {
+  if (!waFavorites.enabled()) return res.status(404).json({ error: 'disabled' });
+  let data;
+  try {
+    data = loadWithSessionKey(req);
+  } catch (e) {
+    return res.status(401).json({ error: 'unauthenticated' });
+  }
+  if (data.waImportDone) return res.status(410).json({ error: 'done', message: 'As favoritas do WhatsApp já foram importadas.' });
+  let result;
+  try {
+    result = await waFavorites.scan();
+  } catch (e) {
+    return res.status(502).json({ error: 'whatsapp', message: e.message || 'Não consegui ler o WhatsApp deste Mac.' });
+  }
+  const have = new Set((data.stickers || []).filter((s) => s.kind === 'sticker').map((s) => s.hash));
+  res.json({
+    total: result.total,
+    missing: result.missing,
+    items: result.items.map((it) => ({ key: it.key, inLibrary: have.has(it.key) })),
+  });
+});
+
+roomRouter.get('/api/stickers/whatsapp-favorites/:key', requireAuth, async (req, res) => {
+  if (!waFavorites.enabled() || !/^[0-9a-f]{64}$/.test(req.params.key)) return res.status(404).end();
+  try {
+    if (loadWithSessionKey(req).waImportDone) return res.status(404).end();
+  } catch (e) {
+    return res.status(401).end();
+  }
+  let result;
+  try {
+    result = await waFavorites.scan();
+  } catch (e) {
+    return res.status(502).end();
+  }
+  const item = result.items.find((it) => it.key === req.params.key);
+  if (!item) return res.status(404).end();
+  res.setHeader('Content-Type', 'image/webp');
+  res.setHeader('Content-Security-Policy', MEDIA_CSP);
+  res.send(item.buffer);
+});
+
+// Importa as escolhidas. O celular manda de até 25 em 25; o último lote vem
+// com final: true e é ele que fecha a importação de vez.
 const WA_BATCH = 25;
 let waImportBusy = false;
 roomRouter.post('/api/stickers/import-whatsapp', requireAuth, async (req, res) => {
   if (!waFavorites.enabled()) return res.status(404).json({ error: 'disabled' });
-  const sender = cleanSender(req.body && req.body.sender);
-  const offset = Math.max(0, parseInt(req.body && req.body.offset, 10) || 0);
-  if (!sender) return res.status(400).json({ error: 'invalid' });
+  const body = req.body || {};
+  const sender = cleanSender(body.sender);
+  const keys = Array.isArray(body.keys) ? body.keys.filter((k) => typeof k === 'string' && /^[0-9a-f]{64}$/.test(k)) : null;
+  if (!sender || !keys || keys.length > WA_BATCH) return res.status(400).json({ error: 'invalid' });
   if (waImportBusy) return res.status(429).json({ error: 'busy', message: 'Já tem uma importação rodando.' });
   waImportBusy = true;
   try {
-    let favs;
-    let locals;
     try {
-      favs = await waFavorites.listFavorites();
-      locals = await waFavorites.localFiles();
+      if (loadWithSessionKey(req).waImportDone) {
+        return res.status(409).json({ error: 'done', message: 'As favoritas do WhatsApp já foram importadas.' });
+      }
+    } catch (e) {
+      return res.status(401).json({ error: 'unauthenticated' });
+    }
+    let result;
+    try {
+      result = await waFavorites.scan();
     } catch (e) {
       return res.status(502).json({ error: 'whatsapp', message: e.message || 'Não consegui ler o WhatsApp deste Mac.' });
     }
-    const batch = favs.slice(offset, offset + WA_BATCH);
+    const order = new Map(result.items.map((it, i) => [it.key, i]));
     const ready = [];
     let missing = 0;
-    for (let i = 0; i < batch.length; i++) {
-      const buf = await waFavorites.loadFavorite(batch[i], locals);
+    for (const key of [...new Set(keys)]) {
+      const item = result.items.find((it) => it.key === key);
       let sticker = null;
-      if (buf) {
+      if (item) {
         try {
-          sticker = await stickerTools.toSticker(buf, { passthroughMax: MAX_STICKER_BYTES });
+          sticker = await stickerTools.toSticker(item.buffer, { passthroughMax: MAX_STICKER_BYTES });
         } catch (e) {
           sticker = null;
         }
       }
-      if (sticker) ready.push({ sticker, order: offset + i });
+      if (sticker) ready.push({ sticker, order: order.get(key) });
       else missing += 1;
     }
     const data = loadWithSessionKey(req);
@@ -1515,29 +1571,22 @@ roomRouter.post('/api/stickers/import-whatsapp', requireAuth, async (req, res) =
     let duplicates = 0;
     let full = false;
     const now = Date.now();
-    for (const { sticker, order } of ready) {
+    for (const { sticker, order: pos } of ready) {
       // ts decrescente na ordem do WhatsApp: a favorita mais recente lá
       // aparece primeiro na bandeja.
-      const r = addStickerBuffer(req, data, sticker, sender, { source: 'whatsapp', ts: now - order });
+      const r = addStickerBuffer(req, data, sticker, sender, { source: 'whatsapp', ts: now - pos });
       if (r.error === 'full') { full = true; break; }
       if (r.error) missing += 1;
       else if (r.duplicate) duplicates += 1;
       else added += 1;
     }
-    if (added) {
+    const done = body.final === true || full;
+    if (done) data.waImportDone = { at: now, by: sender };
+    if (added || done) {
       store.persist(req.session.key, data);
       bus.emit('stickers-changed', {});
     }
-    const next = offset + WA_BATCH;
-    res.json({
-      ok: true,
-      total: favs.length,
-      added,
-      duplicates,
-      missing,
-      full,
-      nextOffset: !full && next < favs.length ? next : null,
-    });
+    res.json({ ok: true, added, duplicates, missing, full, done });
   } catch (e) {
     console.error(e);
     res.status(401).json({ error: 'unauthenticated' });
@@ -1779,7 +1828,10 @@ roomRouter.post('/api/clear', requireAuth, (req, res) => {
     }
     for (const handle of pendingExpiry.values()) clearTimeout(handle);
     pendingExpiry.clear();
-    store.clearAll(req.session.key, { stickers, prefs: data.prefs || {} }, keepIds);
+    // A importação do WhatsApp é uma vez só: limpar a conversa não reabre.
+    const preserved = { stickers, prefs: data.prefs || {} };
+    if (data.waImportDone) preserved.waImportDone = data.waImportDone;
+    store.clearAll(req.session.key, preserved, keepIds);
     bus.emit('cleared', {});
     res.json({ ok: true });
   } catch (e) {

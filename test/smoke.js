@@ -478,20 +478,43 @@ async function main() {
 
     if (waDir) {
       console.log('\n# favoritas do WhatsApp (contêiner falso)');
-      r = await juan('POST', '/api/stickers/import-whatsapp', { sender: 'Juan', offset: 0 });
-      check('importa: 3 favoritas, 2 com arquivo, 1 perdida', r.res.status === 200 && r.json.total === 3
-        && r.json.added === 2 && r.json.missing === 1 && r.json.nextOffset === null, r.json);
+      const redKey = crypto.createHash('sha256').update(WEBP_RED).digest('hex');
+      const blueKey = crypto.createHash('sha256').update(WEBP_BLUE).digest('hex');
+      r = await juan('GET', '/api/stickers/whatsapp-favorites');
+      check('lista pra escolher: 2 com arquivo (local e baixada), 1 perdida', r.res.status === 200 && r.json.total === 3
+        && r.json.missing === 1 && r.json.items.length === 2 && r.json.items[0].key === redKey && r.json.items[1].key === blueKey, r.json);
+      r = await juan('GET', `/api/stickers/whatsapp-favorites/${blueKey}`, undefined, { raw: true });
+      check('prévia da favorita (baixada e decifrada) chega igual', r.res.status === 200 && r.buf.equals(WEBP_BLUE)
+        && r.res.headers.get('content-type') === 'image/webp' && (r.res.headers.get('content-security-policy') || '').includes('sandbox'));
+      r = await juan('GET', '/api/stickers/whatsapp-favorites/nao-e-hash', undefined, { raw: true });
+      check('prévia com chave inválida = 404', r.res.status === 404);
+      r = await anon('GET', `/api/stickers/whatsapp-favorites/${redKey}`, undefined, { raw: true });
+      check('prévia exige sessão', r.res.status === 401);
+      r = await juan('POST', '/api/stickers/import-whatsapp', { sender: 'Juan', keys: 'tudo' });
+      check('importar sem lista de escolhidas = 400', r.res.status === 400);
+      r = await juan('POST', '/api/stickers/import-whatsapp', { sender: 'Juan', keys: [blueKey, 'f'.repeat(64)] });
+      check('importa só a escolhida (lote do meio)', r.res.status === 200 && r.json.added === 1 && r.json.missing === 1 && r.json.done === false, r.json);
+      r = await juan('GET', '/api/stickers/whatsapp-favorites');
+      check('lista marca a que já entrou', r.json.items.find((it) => it.key === blueKey).inLibrary === true
+        && r.json.items.find((it) => it.key === redKey).inLibrary === false, r.json);
+      r = await juan('POST', '/api/stickers/import-whatsapp', { sender: 'Juan', keys: [], final: true });
+      check('último lote fecha a importação', r.res.status === 200 && r.json.done === true, r.json);
       r = await juan('GET', '/api/stickers');
-      const wa = r.json.stickers.filter((s) => s.addedBy === 'Juan' && s.mimeType === 'image/webp' && s.width === 2);
-      check('as duas entraram, a mais recente do WhatsApp primeiro', wa.length === 2 && wa[0].ts > wa[1].ts, wa);
-      r = await juan('GET', `/api/media/${wa[0].mediaId}`, undefined, { raw: true });
-      check('favorita local chega igual', r.buf.equals(WEBP_RED));
-      r = await juan('GET', `/api/media/${wa[1].mediaId}`, undefined, { raw: true });
-      check('favorita baixada e decifrada chega igual', r.buf.equals(WEBP_BLUE));
-      r = await juan('POST', '/api/stickers/import-whatsapp', { sender: 'Juan', offset: 0 });
-      check('importar de novo não duplica', r.json.added === 0 && r.json.duplicates === 2, r.json);
-      r = await anon('POST', '/api/stickers/import-whatsapp', { sender: 'x' });
+      check('só a escolhida entrou; botão some', r.json.waImport === false
+        && r.json.stickers.filter((st) => st.width === 2).length === 1, r.json.waImport);
+      r = await teo('GET', '/api/boot?name=Teo');
+      check('…pros dois', r.json.waImport === false);
+      r = await juan('GET', '/api/stickers/whatsapp-favorites');
+      check('depois de importar, a lista fecha', r.res.status === 410);
+      r = await juan('POST', '/api/stickers/import-whatsapp', { sender: 'Juan', keys: [redKey], final: true });
+      check('…e importar de novo é recusado', r.res.status === 409);
+      r = await juan('GET', `/api/stickers/whatsapp-favorites/${redKey}`, undefined, { raw: true });
+      check('…e as prévias também fecham', r.res.status === 404);
+      r = await anon('POST', '/api/stickers/import-whatsapp', { sender: 'x', keys: [] });
       check('importar exige sessão', r.res.status === 401);
+      await juan('POST', '/api/clear');
+      r = await juan('GET', '/api/boot?name=Juan');
+      check('limpar a conversa não reabre a importação', r.json.waImport === false && r.json.stickers.length > 0);
     } else {
       console.log('      (sem sqlite3: pulando as favoritas do WhatsApp)');
     }

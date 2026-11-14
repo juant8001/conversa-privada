@@ -216,6 +216,31 @@
   </div>
 </div>
 
+<!-- Escolher as favoritas do WhatsApp antes de importar (uma vez só).
+     Mesmo esqueleto dos painéis de Mídia e Favoritas. -->
+<div id="wa-panel" class="media-panel hidden">
+  <header class="chat-header">
+    <button type="button" id="wa-back" class="icon-btn" title="Voltar" aria-label="Voltar">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 5.5 8 12l6.5 6.5"/></svg>
+    </button>
+    <span class="title">Favoritas do WhatsApp</span>
+    <button type="button" id="wa-select-all" class="wa-select-all hidden">Todas</button>
+  </header>
+  <div id="wa-scroll" class="media-scroll">
+    <p id="wa-note" class="wa-note hidden"></p>
+    <div id="wa-grid" class="wa-grid"></div>
+    <div id="wa-loading" class="center-state hidden">
+      <span class="spin-dot"></span>
+      <span>lendo as favoritas do WhatsApp deste Mac</span>
+    </div>
+    <div id="wa-empty" class="center-state hidden"><p id="wa-empty-text"></p></div>
+  </div>
+  <footer class="wa-footer">
+    <p class="wa-once">A importação acontece uma vez só. Depois disso o botão some.</p>
+    <button type="button" id="wa-import" class="wa-import" disabled>Escolha as figurinhas</button>
+  </footer>
+</div>
+
 <!-- Painel "Favoritas": as mensagens que ESTA pessoa marcou com estrela.
      Mesmo esqueleto do painel de Mídia (tela cheia, estado em memória). -->
 <div id="fav-panel" class="media-panel hidden">

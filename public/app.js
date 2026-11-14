@@ -2270,6 +2270,8 @@
       closeMediaPanel();
     } else if (isFavPanelOpen()) {
       closeFavPanel();
+    } else if (isWaPanelOpen()) {
+      closeWaPanel();
     } else if (isTrayOpen()) {
       closeTray();
     }
@@ -4099,6 +4101,10 @@
       if (!res.ok) return;
       const data = await res.json();
       library = Array.isArray(data.stickers) ? data.stickers : [];
+      if (typeof data.waImport === 'boolean' && data.waImport !== waImportEnabled) {
+        waImportEnabled = data.waImport;
+        syncStickerHeader();
+      }
       renderLibrary();
     } catch (e) {
       // sem rede agora: a bandeja fica como estava
@@ -4568,68 +4574,202 @@
     if (entries.some((en) => en.isIntersecting)) loadStickerPage();
   }, { root: stickerScroll, rootMargin: '300px 0px' }).observe(stickerSentinel);
 
-  // Favoritas do WhatsApp do Mac: o servidor vai de 25 em 25 e aqui mostra
-  // o progresso. Pode repetir quando quiser - o que já está não duplica.
+  // Favoritas do WhatsApp do Mac: abre uma tela com todas as que dá pra
+  // trazer, a pessoa marca as que quer e importa. Uma vez só - depois o
+  // servidor grava que já foi e o botão some pros dois.
+  const waPanel = document.getElementById('wa-panel');
+  const waBack = document.getElementById('wa-back');
+  const waGrid = document.getElementById('wa-grid');
+  const waNote = document.getElementById('wa-note');
+  const waLoading = document.getElementById('wa-loading');
+  const waEmpty = document.getElementById('wa-empty');
+  const waEmptyText = document.getElementById('wa-empty-text');
+  const waSelectAll = document.getElementById('wa-select-all');
+  const waImport = document.getElementById('wa-import');
+  let waItems = [];               // [{ key, inLibrary }]
+  const waSelected = new Set();   // keys marcadas
+  let waLoadSeq = 0;
   let waImportBusy = false;
-  waImportBtn.addEventListener('click', async () => {
+
+  function isWaPanelOpen() {
+    return !waPanel.classList.contains('hidden');
+  }
+
+  function waSelectable() {
+    return waItems.filter((it) => !it.inLibrary);
+  }
+
+  function syncWaFooter() {
+    const n = waSelected.size;
+    waImport.disabled = waImportBusy || n === 0;
+    if (!waImportBusy) {
+      waImport.textContent = n === 0 ? 'Escolha as figurinhas'
+        : (n === 1 ? 'Importar 1 figurinha' : `Importar ${n} figurinhas`);
+    }
+    const selectable = waSelectable();
+    waSelectAll.classList.toggle('hidden', selectable.length === 0);
+    waSelectAll.textContent = selectable.length && selectable.every((it) => waSelected.has(it.key))
+      ? 'Nenhuma' : 'Todas';
+  }
+
+  function renderWaGrid() {
+    const nodes = waItems.map((it) => {
+      const tile = document.createElement('button');
+      tile.type = 'button';
+      tile.className = 'wa-tile';
+      tile.dataset.key = it.key;
+      if (it.inLibrary) {
+        tile.classList.add('in-library');
+        tile.title = 'Já está na coleção';
+        tile.disabled = true;
+      } else if (waSelected.has(it.key)) {
+        tile.classList.add('is-selected');
+      }
+      const img = document.createElement('img');
+      img.loading = 'lazy';
+      img.decoding = 'async';
+      img.draggable = false;
+      img.alt = 'Figurinha';
+      img.src = api(`/api/stickers/whatsapp-favorites/${it.key}`);
+      tile.appendChild(img);
+      return tile;
+    });
+    waGrid.replaceChildren(...nodes);
+    syncWaFooter();
+  }
+
+  async function openWaPanel() {
     if (!myName()) {
       focusNameInput();
       return;
     }
+    waPanel.classList.remove('hidden');
+    waItems = [];
+    waSelected.clear();
+    waGrid.replaceChildren();
+    waNote.classList.add('hidden');
+    waEmpty.classList.add('hidden');
+    waLoading.classList.remove('hidden');
+    syncWaFooter();
+    const seq = ++waLoadSeq;
+    try {
+      const res = await fetch(api('/api/stickers/whatsapp-favorites'));
+      const data = await res.json().catch(() => ({}));
+      if (seq !== waLoadSeq) return;
+      if (!res.ok) {
+        if (data.error === 'done') {
+          waImportEnabled = false;
+          syncStickerHeader();
+        }
+        throw new Error(data.message || 'Não consegui ler as favoritas do WhatsApp.');
+      }
+      waItems = Array.isArray(data.items) ? data.items : [];
+      const notes = [];
+      notes.push(waItems.length === 1 ? '1 favorita pode ser importada.' : `${waItems.length} favoritas podem ser importadas.`);
+      if (data.missing) {
+        notes.push(`${data.missing} ${data.missing === 1 ? 'não aparece porque o WhatsApp deste Mac nunca baixou o arquivo' : 'não aparecem porque o WhatsApp deste Mac nunca baixou os arquivos'}. Se quiser ${data.missing === 1 ? 'ela' : 'elas'}, abra as figurinhas favoritas no WhatsApp do Mac e role até o fim antes de importar.`);
+      }
+      waNote.textContent = notes.join(' ');
+      waNote.classList.remove('hidden');
+      if (!waItems.length) {
+        waEmptyText.textContent = 'Nenhuma favorita com arquivo neste Mac.';
+        waEmpty.classList.remove('hidden');
+      }
+      renderWaGrid();
+    } catch (e) {
+      if (seq !== waLoadSeq) return;
+      waEmptyText.textContent = e.message || 'Não consegui ler as favoritas do WhatsApp.';
+      waEmpty.classList.remove('hidden');
+    } finally {
+      if (seq === waLoadSeq) waLoading.classList.add('hidden');
+    }
+  }
+
+  function closeWaPanel() {
+    if (waImportBusy) return; // não deixa a importação pela metade sem ninguém ver
+    waLoadSeq += 1;
+    waPanel.classList.add('hidden');
+  }
+
+  waGrid.addEventListener('click', (e) => {
+    const tile = e.target.closest('.wa-tile');
+    if (!tile || tile.disabled || waImportBusy) return;
+    const key = tile.dataset.key;
+    if (waSelected.has(key)) waSelected.delete(key);
+    else waSelected.add(key);
+    tile.classList.toggle('is-selected', waSelected.has(key));
+    syncWaFooter();
+  });
+
+  waSelectAll.addEventListener('click', () => {
     if (waImportBusy) return;
+    const selectable = waSelectable();
+    const all = selectable.every((it) => waSelected.has(it.key));
+    waSelected.clear();
+    if (!all) selectable.forEach((it) => waSelected.add(it.key));
+    waGrid.querySelectorAll('.wa-tile').forEach((t) => t.classList.toggle('is-selected', waSelected.has(t.dataset.key)));
+    syncWaFooter();
+  });
+
+  waImport.addEventListener('click', async () => {
+    if (waImportBusy || waSelected.size === 0) return;
+    const n = waSelected.size;
+    const ok = await askConfirm(
+      `Importar ${n === 1 ? 'a figurinha escolhida' : `as ${n} figurinhas escolhidas`}? A importação do WhatsApp só pode ser feita uma vez: depois disso o botão some.`,
+      'Importar',
+    );
+    if (!ok) return;
+    // Na ordem do WhatsApp (a mais recente primeiro), em lotes de 25.
+    const keys = waItems.filter((it) => waSelected.has(it.key)).map((it) => it.key);
     waImportBusy = true;
-    waImportBtn.disabled = true;
-    let offset = 0;
-    let total = 0;
+    syncWaFooter();
     let added = 0;
-    let duplicates = 0;
     let missing = 0;
     let full = false;
     let error = '';
     try {
-      for (;;) {
-        uploadProgress.textContent = total
-          ? `Importando favoritas do WhatsApp... ${Math.min(offset, total)} de ${total}`
-          : 'Lendo as favoritas do WhatsApp...';
-        uploadProgress.classList.remove('hidden');
+      for (let i = 0; i < keys.length; i += 25) {
+        waImport.textContent = `Importando... ${Math.min(i + 25, keys.length)} de ${keys.length}`;
+        const batch = keys.slice(i, i + 25);
         const res = await fetch(api('/api/stickers/import-whatsapp'), {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ sender: myName(), offset }),
+          body: JSON.stringify({ sender: myName(), keys: batch, final: i + 25 >= keys.length }),
         });
         const data = await res.json().catch(() => ({}));
         if (!res.ok) {
           error = data.message || 'Não foi possível importar agora.';
           break;
         }
-        total = data.total || 0;
         added += data.added || 0;
-        duplicates += data.duplicates || 0;
         missing += data.missing || 0;
-        full = full || !!data.full;
-        if (data.nextOffset == null) break;
-        offset = data.nextOffset;
+        if (data.full) { full = true; break; }
       }
     } catch (e) {
       error = 'Erro de conexão durante a importação.';
     } finally {
       waImportBusy = false;
-      waImportBtn.disabled = false;
-      uploadProgress.classList.add('hidden');
+      syncWaFooter();
     }
-    refreshLibrary();
     if (error && !added) {
       toast(error);
       return;
     }
-    const parts = [];
-    parts.push(added === 1 ? '1 figurinha importada' : `${added} figurinhas importadas`);
-    if (duplicates) parts.push(duplicates === 1 ? '1 já estava aqui' : `${duplicates} já estavam aqui`);
-    if (missing) parts.push(missing === 1 ? '1 não está salva neste Mac' : `${missing} não estão salvas neste Mac`);
-    let msg = `${parts.join(', ')}.`;
+    waImportEnabled = false;
+    syncStickerHeader();
+    refreshLibrary();
+    closeWaPanel();
+    let msg = added === 1 ? '1 figurinha importada do WhatsApp.' : `${added} figurinhas importadas do WhatsApp.`;
+    if (missing) msg += ` ${missing} não ${missing === 1 ? 'pôde' : 'puderam'} ser lida${missing === 1 ? '' : 's'}.`;
     if (full) msg += ' A coleção encheu antes de terminar.';
-    else if (missing) msg += ' Abra as favoritas no WhatsApp do Mac pra ele baixar e importe de novo.';
-    toast(msg, 7000);
+    if (error) msg += ` ${error}`;
+    toast(msg, 6000);
+  });
+
+  waBack.addEventListener('click', closeWaPanel);
+  waImportBtn.addEventListener('click', () => {
+    if (isTouchPrimary) closeTray();
+    openWaPanel();
   });
 
   // Toque longo / clique direito num item salvo: "Remover da coleção".
