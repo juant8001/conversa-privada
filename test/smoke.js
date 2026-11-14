@@ -13,6 +13,8 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const zlib = require('zlib');
+const crypto = require('crypto');
+const { execFileSync } = require('child_process');
 
 const PORT = 4300 + Math.floor(Math.random() * 500);
 const SLUG = 'smoke-test-slug-0123456789abcdef';
@@ -35,13 +37,91 @@ function check(name, cond, extra) {
 // PNG 1x1 transparente e GIF 1x1 - o menor arquivo válido de cada tipo.
 const PNG = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
 const GIF = Buffer.from('R0lGODlhAQABAIAAAAAAAP///yH5BAEAAAAALAAAAAABAAEAAAIBRAA7', 'base64');
+// Duas figurinhas WebP 2x2 (vermelha e azul), pras favoritas do WhatsApp falso.
+const WEBP_RED = Buffer.from('UklGRhwAAABXRUJQVlA4TA8AAAAvAUAAAAcQ/Y/+ByKi/wEA', 'base64');
+const WEBP_BLUE = Buffer.from('UklGRhwAAABXRUJQVlA4TA8AAAAvAUAAAAcQ0f/+ByKi/wEA', 'base64');
+const b64sha = (buf) => crypto.createHash('sha256').update(buf).digest('base64');
+
+// Arquivo cifrado como o WhatsApp guarda no servidor de mídia dele.
+function waEncrypt(plain, mediaKey) {
+  const keys = Buffer.from(crypto.hkdfSync('sha256', mediaKey, Buffer.alloc(32), Buffer.from('WhatsApp Image Keys'), 112));
+  const iv = keys.subarray(0, 16);
+  const c = crypto.createCipheriv('aes-256-cbc', keys.subarray(16, 48), iv);
+  const enc = Buffer.concat([c.update(plain), c.final()]);
+  const mac = crypto.createHmac('sha256', keys.subarray(48, 80)).update(iv).update(enc).digest().subarray(0, 10);
+  return Buffer.concat([enc, mac]);
+}
+const WA_KEY_BLUE = crypto.randomBytes(32);
+const WA_ENC_BLUE = waEncrypt(WEBP_BLUE, WA_KEY_BLUE);
+
+function pbVarint(n) {
+  const out = [];
+  let v = BigInt(n);
+  do {
+    let b = Number(v & 0x7fn);
+    v >>= 7n;
+    if (v) b |= 0x80;
+    out.push(b);
+  } while (v);
+  return Buffer.from(out);
+}
+function pbField(no, value) {
+  if (typeof value === 'number' || typeof value === 'bigint') return Buffer.concat([pbVarint((no << 3) | 0), pbVarint(value)]);
+  const buf = Buffer.isBuffer(value) ? value : Buffer.from(String(value));
+  return Buffer.concat([pbVarint((no << 3) | 2), pbVarint(buf.length), buf]);
+}
+
+// Contêiner falso do WhatsApp do Mac: 3 favoritas valendo (uma com arquivo
+// no disco, uma só no servidor de mídia, uma perdida) e uma desfavoritada.
+function makeFakeWhatsApp(mediaOrigin) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'pc-wa-'));
+  fs.mkdirSync(path.join(dir, 'AppState', 'ABC-123'), { recursive: true });
+  fs.mkdirSync(path.join(dir, 'stickers', 'no-sticker-pack'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'stickers', 'no-sticker-pack', 'red.webp'), WEBP_RED);
+  const fav = (hash, { key, encSha, directPath, isFavorite = 1, ts }) => {
+    const action = Buffer.concat([
+      pbField(1, `${mediaOrigin}/expirado${directPath}`),
+      encSha ? pbField(2, encSha) : Buffer.alloc(0),
+      pbField(3, key || crypto.randomBytes(32)),
+      pbField(4, 'image/webp'),
+      pbField(7, directPath),
+      pbField(9, isFavorite),
+    ]);
+    const value = Buffer.concat([pbField(1, ts), pbField(33, action)]);
+    const index = JSON.stringify(['favoriteSticker', hash]).replace(/'/g, "''");
+    return `insert into ZAPPSTATECONFIRMEDMUTATIONENTITY (ZVERSION, ZACTIONNAME, ZINDEX, ZVALUE) values (7, 'favoriteSticker', '${index}', X'${value.toString('hex')}');`;
+  };
+  const appSql = [
+    'create table ZAPPSTATECONFIRMEDMUTATIONENTITY (Z_PK integer primary key, ZVERSION integer, ZACTIONNAME varchar, ZINDEX blob, ZVALUE blob);',
+    fav(b64sha(WEBP_RED), { directPath: '/v/red', ts: 3000 }),
+    fav(b64sha(WEBP_BLUE), { key: WA_KEY_BLUE, encSha: crypto.createHash('sha256').update(WA_ENC_BLUE).digest(), directPath: '/v/blue', ts: 2000 }),
+    fav(b64sha(Buffer.from('sumiu')), { directPath: '/v/sumiu', ts: 1000 }),
+    fav(b64sha(Buffer.from('desfavoritada')), { directPath: '/v/x', ts: 500, isFavorite: 0 }),
+    "insert into ZAPPSTATECONFIRMEDMUTATIONENTITY (ZVERSION, ZACTIONNAME, ZINDEX, ZVALUE) values (1, 'star', 'x', X'00');",
+  ].join('\n');
+  execFileSync('sqlite3', [path.join(dir, 'AppState', 'ABC-123', 'AppState.sqlite')], { input: appSql });
+  execFileSync('sqlite3', [path.join(dir, 'Sticker.sqlite')], {
+    input: `create table ZWACDSTICKER (Z_PK integer primary key, ZFILEHASH varchar, ZRELATIVEIMAGEPATH varchar);
+insert into ZWACDSTICKER (ZFILEHASH, ZRELATIVEIMAGEPATH) values ('${b64sha(WEBP_RED)}', 'no-sticker-pack/red.webp');`,
+  });
+  return dir;
+}
+
+function hasBin(name) {
+  try {
+    execFileSync('which', [name], { stdio: 'ignore' });
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
 
 // Servidor falso do GIPHY: responde a busca e serve a "mídia" dos resultados.
 function startFakeGiphy() {
   return new Promise((resolve) => {
     const srv = http.createServer((req, res) => {
       const origin = `http://127.0.0.1:${srv.address().port}`;
-      if (req.url.startsWith('/v1/gifs/')) {
+      if (req.url.startsWith('/v1/gifs/') || req.url.startsWith('/v1/stickers/')) {
         const rendition = { url: `${origin}/media/cat.gif`, width: '120', height: '90' };
         res.setHeader('Content-Type', 'application/json');
         res.end(JSON.stringify({
@@ -54,6 +134,18 @@ function startFakeGiphy() {
       } else if (req.url === '/media/cat.gif') {
         res.setHeader('Content-Type', 'image/gif');
         res.end(GIF);
+      } else if (req.url.startsWith('/fx/')) {
+        // fxtwitter falso: post 111 tem GIF, post 222 só texto.
+        res.setHeader('Content-Type', 'application/json');
+        if (req.url.endsWith('/status/111')) {
+          res.end(JSON.stringify({ tweet: { media: { all: [{ type: 'gif', url: `${origin}/media/cat.gif` }] } } }));
+        } else if (req.url.endsWith('/status/333')) {
+          res.end(JSON.stringify({ tweet: { media: { all: [{ type: 'photo', url: 'http://127.0.0.1:1/interno.png' }] } } }));
+        } else {
+          res.end(JSON.stringify({ tweet: { text: 'só texto' } }));
+        }
+      } else if (req.url === '/wa/v/blue') {
+        res.end(WA_ENC_BLUE);
       } else {
         res.statusCode = 404;
         res.end();
@@ -96,6 +188,9 @@ function form(fields) {
 
 async function main() {
   const giphy = await startFakeGiphy();
+  const fakeOrigin = `http://127.0.0.1:${giphy.address().port}`;
+  const canWa = hasBin('sqlite3');
+  const waDir = canWa ? makeFakeWhatsApp(fakeOrigin) : null;
   const env = {
     ...process.env,
     PORT: String(PORT),
@@ -108,7 +203,10 @@ async function main() {
     HERMES_CODE: 'entrada-do-hermes-teste',
     HERMES_BIN: '/bin/echo', // "agente" de mentira: devolve o próprio prompt
     GIPHY_API_KEY: 'chave-de-teste',
-    GIPHY_API_BASE: `http://127.0.0.1:${giphy.address().port}`,
+    GIPHY_API_BASE: fakeOrigin,
+    FXTWITTER_API_BASE: `${fakeOrigin}/fx`,
+    WHATSAPP_MEDIA_BASE: `${fakeOrigin}/wa`,
+    ...(waDir ? { WHATSAPP_IMPORT: '1', WHATSAPP_CONTAINER: waDir } : {}),
   };
   const server = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')], { env, stdio: ['ignore', 'pipe', 'pipe'] });
   let serverErr = '';
@@ -341,6 +439,63 @@ async function main() {
     const left = fs.readdirSync(path.join(DATA_DIR, 'media'));
     check('sobrou no disco só o arquivo da coleção', left.length === 1, left);
 
+    console.log('\n# figurinha feita no servidor (galeria, link, GIPHY)');
+    r = await juan('GET', '/api/boot?name=Juan');
+    const tools = r.json.stickerTools === true;
+    check('boot informa conversor e importação do WhatsApp', typeof r.json.stickerTools === 'boolean' && r.json.waImport === !!waDir, r.json);
+    console.log(`      (conversor ${tools ? 'ligado' : 'desligado'} nesta máquina)`);
+    const before = (await juan('GET', '/api/stickers')).json.stickers.length;
+    r = await juan('POST', '/api/stickers/convert', form({ sender: 'Juan', file: { buffer: GIF, type: 'image/gif', name: 'a.gif' } }));
+    check('GIF da galeria vira figurinha', r.res.status === 200 && r.json.sticker.kind === 'sticker'
+      && r.json.sticker.mimeType === (tools ? 'image/webp' : 'image/gif'), r.json);
+    const fromGallery = r.json.sticker;
+    r = await juan('GET', `/api/media/${fromGallery.mediaId}`, undefined, { raw: true });
+    check('figurinha convertida abre', r.res.status === 200 && (tools ? r.buf.toString('ascii', 8, 12) === 'WEBP' : r.buf.equals(GIF)));
+    r = await juan('POST', '/api/stickers/convert', form({ sender: 'Juan', file: { buffer: Buffer.from('oi'), type: 'text/plain', name: 'a.txt' } }));
+    check('texto não vira figurinha', r.res.status === 400);
+    r = await juan('POST', '/api/stickers/convert', form({ sender: 'Juan', file: { buffer: Buffer.from('não é vídeo nenhum'), type: 'video/mp4', name: 'v.mp4' } }));
+    check('vídeo quebrado responde com erro legível', [422, 501].includes(r.res.status) && /figurinha|arquivo|ferramentas/i.test(r.json.message), r.json);
+    r = await juan('POST', '/api/stickers/from-link', { sender: 'Juan', url: `${fakeOrigin}/media/cat.gif` });
+    check('resultado do GIPHY vira figurinha (mesmo arquivo = não duplica)', r.res.status === 200 && r.json.duplicate === true && r.json.sticker.id === fromGallery.id, r.json);
+    r = await juan('POST', '/api/stickers/from-link', { sender: 'Juan', url: 'olha esse https://x.com/fulano/status/111?s=20 kkk' });
+    check('link do X (no meio do texto) vira figurinha', r.res.status === 200 && r.json.sticker.id === fromGallery.id, r.json);
+    r = await juan('POST', '/api/stickers/from-link', { sender: 'Juan', url: 'https://twitter.com/fulano/status/222' });
+    check('post do X sem mídia avisa', r.res.status === 422 && /não tem foto/.test(r.json.message), r.json);
+    r = await juan('POST', '/api/stickers/from-link', { sender: 'Juan', url: 'https://x.com/fulano/status/333' });
+    check('mídia do X fora do twimg é recusada', r.res.status === 422, r.json);
+    r = await juan('POST', '/api/stickers/from-link', { sender: 'Juan', url: 'http://127.0.0.1:1/x.gif' });
+    check('link de outro lugar é recusado', r.res.status === 422 && /X\/Twitter e do GIPHY/.test(r.json.message), r.json);
+    r = await juan('POST', '/api/stickers/from-link', { sender: 'Juan', url: 'https://giphy.com.evil.example/media/x.gif' });
+    check('domínio parecido com GIPHY é recusado', r.res.status === 422, r.json);
+    r = await juan('POST', '/api/stickers/from-link', { sender: 'Juan' });
+    check('link vazio = 400', r.res.status === 400);
+    r = await juan('GET', '/api/stickers/giphy-search?q=gato');
+    check('busca de figurinhas no GIPHY', r.res.status === 200 && r.json.items.length === 1 && r.json.items[0].id === 'abc');
+    r = await anon('POST', '/api/stickers/from-link', { sender: 'x', url: `${fakeOrigin}/media/cat.gif` });
+    check('criar por link exige sessão', r.res.status === 401);
+    r = await juan('GET', '/api/stickers');
+    check('coleção ganhou só 1 item (o resto era o mesmo arquivo)', r.json.stickers.length === before + 1, r.json.stickers.length);
+
+    if (waDir) {
+      console.log('\n# favoritas do WhatsApp (contêiner falso)');
+      r = await juan('POST', '/api/stickers/import-whatsapp', { sender: 'Juan', offset: 0 });
+      check('importa: 3 favoritas, 2 com arquivo, 1 perdida', r.res.status === 200 && r.json.total === 3
+        && r.json.added === 2 && r.json.missing === 1 && r.json.nextOffset === null, r.json);
+      r = await juan('GET', '/api/stickers');
+      const wa = r.json.stickers.filter((s) => s.addedBy === 'Juan' && s.mimeType === 'image/webp' && s.width === 2);
+      check('as duas entraram, a mais recente do WhatsApp primeiro', wa.length === 2 && wa[0].ts > wa[1].ts, wa);
+      r = await juan('GET', `/api/media/${wa[0].mediaId}`, undefined, { raw: true });
+      check('favorita local chega igual', r.buf.equals(WEBP_RED));
+      r = await juan('GET', `/api/media/${wa[1].mediaId}`, undefined, { raw: true });
+      check('favorita baixada e decifrada chega igual', r.buf.equals(WEBP_BLUE));
+      r = await juan('POST', '/api/stickers/import-whatsapp', { sender: 'Juan', offset: 0 });
+      check('importar de novo não duplica', r.json.added === 0 && r.json.duplicates === 2, r.json);
+      r = await anon('POST', '/api/stickers/import-whatsapp', { sender: 'x' });
+      check('importar exige sessão', r.res.status === 401);
+    } else {
+      console.log('      (sem sqlite3: pulando as favoritas do WhatsApp)');
+    }
+
     console.log('\n# entrada direta do Hermes');
     const guest = makeClient();
     r = await anon('POST', '/api/hermes', { text: 'oi' });
@@ -351,7 +506,9 @@ async function main() {
     check('…sem autenticar no chat', r.json.authenticated === false && r.json.hermes === true);
     for (const [method, route] of [['GET', '/api/messages'], ['GET', '/api/boot?name=x'], ['GET', '/api/stickers'],
       ['GET', '/api/starred?name=x'], ['GET', '/api/media-list'], ['GET', '/api/export'], ['GET', '/api/stream'],
-      ['GET', '/api/gifs/search?q=a'], ['POST', '/api/typing'], ['POST', '/api/clear'], ['POST', '/api/messages']]) {
+      ['GET', '/api/gifs/search?q=a'], ['POST', '/api/typing'], ['POST', '/api/clear'], ['POST', '/api/messages'],
+      ['POST', '/api/stickers/from-link'], ['POST', '/api/stickers/convert'], ['POST', '/api/stickers/import-whatsapp'],
+      ['GET', '/api/stickers/giphy-search?q=a']]) {
       r = await guest(method, route, method === 'POST' ? { sender: 'x', text: 'x', name: 'x' } : undefined, { raw: true });
       check(`sessão do Hermes não abre ${method} ${route}`, r.res.status === 401, r.res.status);
     }
@@ -379,6 +536,7 @@ async function main() {
     server.kill();
     giphy.close();
     fs.rmSync(DATA_DIR, { recursive: true, force: true });
+    if (waDir) fs.rmSync(waDir, { recursive: true, force: true });
   }
 
   console.log(`\n${passed} ok, ${failed} falharam`);

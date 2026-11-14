@@ -36,7 +36,10 @@ cookies work over plain-HTTP localhost).
 Optional features, each **off unless its variable is set** (the repo is public,
 so none of these values may ever be hardcoded): `HERMES_CODE` and/or
 `HERMES_TRIGGER` (+ `HERMES_BIN`) for the Hermes portal, `GIPHY_API_KEY`
-(+ `GIPHY_RATING`, default `r`) for GIF search.
+(+ `GIPHY_RATING`, default `r`) for GIF search, `WHATSAPP_IMPORT=1` for the
+"import WhatsApp favorites" button. Test-only overrides: `FXTWITTER_API_BASE`,
+`WHATSAPP_CONTAINER`, `WHATSAPP_MEDIA_BASE`, `STICKER_ENCODER=img2webp`,
+`FFMPEG_PATH`.
 
 ## Architecture
 
@@ -328,3 +331,50 @@ flag.
 - **Bandeja** (`#tray`): emoji / figurinhas / GIFs, in the page flow under the
   composer (not floating), so `#messages` shrinks by itself. Grids stay
   mounted while closed for the same `no-store` reason as the media tab.
+
+## Figurinhas feitas no servidor (v46)
+
+- **Conversão** (`lib/sticker-tools.js`): any image/GIF/video → WebP, longest
+  side ≤512, animated when the input is (≤8s, retries with lower fps/quality
+  until ~1MB). No npm dependency: uses the Mac's `ffmpeg`. Homebrew's ffmpeg
+  has **no** `libwebp` encoder, so the usual path is ffmpeg → PNG frames →
+  `img2webp`/`cwebp` (Homebrew `webp`); an ffmpeg with `libwebp_anim` is used
+  directly. **GIFs** go through `convertGif`: ffmpeg re-encodes a smaller GIF
+  (palette with `reserve_transparent`) and `gif2webp -lossy` makes the WebP —
+  the only lossy animated encoder here that keeps alpha (`img2webp -lossy` and
+  ffmpeg's `libwebp_anim` silently drop it, which ruins GIPHY stickers).
+  One conversion at a time (`serialize`). WebP input passes through
+  untouched (ffmpeg can't decode animated WebP). No tools → `stickerTools:
+  false` in `/api/boot`; photos still go through the old client-side
+  `imageToSticker`, small GIFs pass through as-is.
+- **Routes**: `POST /api/stickers/convert` (multipart, ≤60MB, gallery
+  video/GIF), `POST /api/stickers/from-link` (`{url}` — X/Twitter via the
+  fxtwitter API with yt-dlp as fallback, GIPHY page/media links; also used by
+  the GIPHY sticker search results), `GET /api/stickers/giphy-search` (same
+  handler as GIF search, `/v1/stickers`). `lib/sticker-links.js` only fetches
+  from `*.twimg.com`, `*.giphy.com` and the API hosts, re-checking the final
+  URL after redirects — a pasted link can't make the Mac hit the LAN.
+  Conversion runs **before** `loadWithSessionKey`, so a slow ffmpeg never
+  writes a stale copy of the conversation over the other person's messages.
+- **Favoritas do WhatsApp** (`lib/whatsapp-favorites.js`, `WHATSAPP_IMPORT=1`):
+  the Mac WhatsApp keeps the synced favorites list in
+  `AppState/*/AppState.sqlite` (`ZAPPSTATECONFIRMEDMUTATIONENTITY`, action
+  `favoriteSticker`, protobuf `SyncActionValue.stickerAction` = field 33;
+  index = `["favoriteSticker", base64 sha256 of the file]`; latest version
+  wins, `isFavorite` false = removed). Files come from `stickers/` (matched by
+  `ZFILEHASH` in `Sticker.sqlite`) or are downloaded from `mmg.whatsapp.net`
+  and decrypted (HKDF "WhatsApp Image Keys", AES-CBC + 10-byte HMAC). Every
+  file must hash to the favorite's sha256. Read-only through `/usr/bin/sqlite3
+  -readonly`. In practice the signed download URLs expire after a few months,
+  so old favorites the Mac never cached come back as `missing` — the client
+  tells the person to open the favorites in WhatsApp for Mac and import again.
+  `POST /api/stickers/import-whatsapp {offset}` works in batches of 25
+  (`nextOffset`), dedupes by file hash (`item.hash`), `ts = now - order` keeps
+  WhatsApp's order in the tray.
+- **Client** (aba Figurinhas): `#sticker-search-form` — plain text searches
+  GIPHY stickers (`stickerMode = 'search'`, tapping a result *creates* the
+  sticker in the library, it doesn't send), a link shows "Criar".
+  `#wa-import-btn` loops the batches with progress in `#upload-progress`.
+  The "+" accepts `image/*,video/*`; video and GIF go to `/convert` when the
+  server has the tools.
+

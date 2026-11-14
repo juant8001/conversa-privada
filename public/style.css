@@ -2266,6 +2266,43 @@ body::before {
 }
 .giphy-attrib::before { content: "POWERED BY "; font-weight: 500; }
 
+.sticker-link-btn {
+  border: none;
+  background: var(--accent);
+  color: #fff;
+  border-radius: 12px;
+  padding: 8px 14px;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  flex-shrink: 0;
+  -webkit-appearance: none;
+  appearance: none;
+  touch-action: manipulation;
+}
+.sticker-link-btn:disabled { opacity: 0.5; cursor: default; }
+.wa-import-btn {
+  display: block;
+  width: 100%;
+  margin: 2px 0 6px;
+  padding: 9px 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--card-2);
+  color: var(--ink);
+  font: inherit;
+  font-size: 14px;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+  touch-action: manipulation;
+}
+.wa-import-btn::before { content: "⭐ "; }
+.wa-import-btn:hover { border-color: var(--muted); }
+.wa-import-btn:disabled { opacity: 0.6; cursor: default; }
+.sticker-tile.sticker-result { background: rgba(255,255,255,0.03); }
+
 /* ---- painel de favoritas ---- */
 .fav-list {
   max-width: 720px;

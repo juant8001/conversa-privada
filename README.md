@@ -49,6 +49,12 @@ sofisticado com acesso total ao sistema.
   conversa também oferece *Criar figurinha*, e um GIF, *Salvar nos GIFs*. A
   coleção é compartilhada pelos dois e fica cifrada no Mac como todo o resto.
 - **Colar imagem**: Ctrl/Cmd+V com uma imagem ou GIF copiado envia direto.
+- **Mais jeitos de criar figurinha** (aba Figurinhas): o **+** aceita foto, vídeo
+  ou GIF da galeria (vídeo e GIF viram figurinha animada); o campo do topo busca
+  figurinhas no GIPHY ou, colando um link de post do X/Twitter ou do GIPHY, cria
+  a figurinha dele. Vídeo, GIF e link são convertidos no Mac com `ffmpeg` e as
+  ferramentas `webp` (`brew install ffmpeg webp`); sem elas, só a foto comum
+  continua virando figurinha.
 - Foto, vídeo, áudio, visualização única, respostas e a aba de mídia.
 
 ### Opcionais (variáveis no `.env`)
@@ -59,6 +65,7 @@ Nenhum destes vem ligado. Cada um só existe se a variável estiver no `.env`
 | Variável | O que liga |
 | --- | --- |
 | `GIPHY_API_KEY` | Busca de GIFs na aba GIFs. Crie uma chave grátis em https://developers.giphy.com. A busca, as prévias e o GIF escolhido passam pelo seu Mac — o navegador de quem está no chat nunca fala com o GIPHY. O que **sai** é o texto buscado, do IP do Mac pro GIPHY. |
+| `WHATSAPP_IMPORT=1` | Botão "Importar favoritas do WhatsApp" na aba Figurinhas: lê (só leitura) as figurinhas favoritas do WhatsApp instalado neste Mac e coloca na coleção. Só vem o que o WhatsApp do Mac ainda tem no disco ou consegue baixar; repetir não duplica. Qualquer um dos dois no chat pode apertar o botão. |
 | `HERMES_TRIGGER` | Frase que, digitada no campo de mensagem, abre um portal local em vez de ser enviada. |
 
 ## Exportar backup

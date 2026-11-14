@@ -354,7 +354,7 @@
   }
 
   let toastTimer = null;
-  function toast(message) {
+  function toast(message, ms) {
     toastEl.textContent = message;
     toastEl.classList.remove('hidden');
     // force reflow so the transition replays if called twice in a row
@@ -364,7 +364,7 @@
     toastTimer = setTimeout(() => {
       toastEl.classList.remove('show');
       setTimeout(() => toastEl.classList.add('hidden'), 250);
-    }, 3200);
+    }, ms || 3200);
   }
 
   // "A outra pessoa esta online agora" - presence tracking piggybacks on
@@ -3908,6 +3908,13 @@
   const gifSearchForm = document.getElementById('gif-search-form');
   const gifSearchInput = document.getElementById('gif-search-input');
   const GIF_EMPTY_SAVED_TEXT = gifEmpty.textContent;
+  const stickerSearchForm = document.getElementById('sticker-search-form');
+  const stickerSearchInput = document.getElementById('sticker-search-input');
+  const stickerLinkBtn = document.getElementById('sticker-link-btn');
+  const stickerGiphyAttrib = document.getElementById('sticker-giphy-attrib');
+  const stickerSentinel = document.getElementById('sticker-sentinel');
+  const waImportBtn = document.getElementById('wa-import-btn');
+  const STICKER_EMPTY_SAVED_TEXT = stickerEmpty.textContent;
 
   const TRAY_TAB_KEY = 'private-chat:tray-tab';
   const TRAY_TABS = ['emoji', 'stickers', 'gifs'];
@@ -3998,7 +4005,10 @@
   // ou removeu algo). Os tiles são guardados por id e REAPROVEITADOS a cada
   // redesenho - mover um <img> no DOM não rebaixa o arquivo, recriar sim.
   let library = [];
+  let stickerMode = 'saved'; // 'saved' | 'search' (resultados do GIPHY)
   let giphyEnabled = false;
+  let stickerToolsEnabled = false; // o servidor converte vídeo/GIF/link (ffmpeg)
+  let waImportEnabled = false;     // o servidor lê as favoritas do WhatsApp do Mac
   const libraryTiles = new Map(); // id do item -> elemento do tile
 
   function libraryOf(kind) {
@@ -4018,7 +4028,7 @@
     tile.innerHTML = ADD_TILE_SVG;
     return tile;
   }
-  const stickerAddTile = makeAddTile('Criar figurinha a partir de uma imagem');
+  const stickerAddTile = makeAddTile('Criar figurinha de foto, vídeo ou GIF da galeria');
   const gifAddTile = makeAddTile('Adicionar um GIF da galeria');
 
   function buildLibraryTile(item) {
@@ -4067,7 +4077,10 @@
   }
 
   function renderLibrary() {
-    renderLibraryGrid(stickerGrid, 'sticker', stickerAddTile, stickerEmpty);
+    if (stickerMode === 'saved') {
+      stickerEmpty.textContent = STICKER_EMPTY_SAVED_TEXT;
+      renderLibraryGrid(stickerGrid, 'sticker', stickerAddTile, stickerEmpty);
+    }
     if (gifMode === 'saved') {
       gifEmpty.textContent = GIF_EMPTY_SAVED_TEXT;
       renderLibraryGrid(gifGrid, 'gif', gifAddTile, gifEmpty);
@@ -4104,7 +4117,10 @@
       }
       library = Array.isArray(data.stickers) ? data.stickers : [];
       giphyEnabled = !!data.giphy;
+      stickerToolsEnabled = !!data.stickerTools;
+      waImportEnabled = !!data.waImport;
       gifSearchForm.classList.toggle('hidden', !giphyEnabled);
+      syncStickerHeader();
       hermesCfg = data.hermes || null;
       renderLibrary();
     } catch (e) {
@@ -4228,6 +4244,26 @@
     return { blob: out, width: canvas.width, height: canvas.height, filename: `figurinha.${ext}` };
   }
 
+  // O que vai pro servidor converter (fica animado e com o tamanho certo)
+  // e o que o navegador mesmo reduz: foto comum sempre aqui (funciona até
+  // sem ffmpeg no Mac); vídeo e GIF no servidor quando ele sabe converter.
+  function needsServerConvert(file) {
+    if (file.type.startsWith('video/')) return true;
+    if (file.type === 'image/gif') return stickerToolsEnabled;
+    return false;
+  }
+
+  async function convertOnServer(file) {
+    const form = new FormData();
+    form.append('file', file, file.name || 'arquivo');
+    form.append('sender', myName());
+    const res = await fetch(api('/api/stickers/convert'), { method: 'POST', body: form });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.message || 'Não foi possível criar essa figurinha.');
+    mergeLibraryItem(data.sticker);
+    return data;
+  }
+
   async function addStickersFromFiles(files) {
     if (!files.length) return;
     if (!myName()) {
@@ -4237,14 +4273,23 @@
     let ok = 0;
     let lastError = '';
     for (let i = 0; i < files.length; i++) {
+      const file = files[i];
       uploadProgress.textContent = files.length > 1
         ? `Criando figurinha ${i + 1} de ${files.length}...`
         : 'Criando figurinha...';
       uploadProgress.classList.remove('hidden');
       try {
-        if (!files[i].type.startsWith('image/')) throw new Error('Só imagem vira figurinha.');
-        const st = await imageToSticker(files[i]);
-        await uploadLibraryItem('sticker', st.blob, st.filename, st.width, st.height);
+        const isVideo = file.type.startsWith('video/');
+        if (!file.type.startsWith('image/') && !isVideo) throw new Error('Só foto, vídeo ou GIF vira figurinha.');
+        if (isVideo && !stickerToolsEnabled) {
+          throw new Error('Este servidor ainda não converte vídeo em figurinha (falta o ffmpeg no Mac).');
+        }
+        if (needsServerConvert(file)) {
+          await convertOnServer(file);
+        } else {
+          const st = await imageToSticker(file);
+          await uploadLibraryItem('sticker', st.blob, st.filename, st.width, st.height);
+        }
         ok += 1;
       } catch (e) {
         lastError = e.message || '';
@@ -4345,15 +4390,251 @@
   }
 
   stickerGrid.addEventListener('click', (e) => {
+    const result = e.target.closest('button[data-result]');
+    if (result) {
+      createStickerFromGiphy(stickerResults.get(result.dataset.result));
+      return;
+    }
     const tile = e.target.closest('button');
     if (!tile) return;
     if (tile === stickerAddTile) stickerFileInput.click();
     else if (tile.dataset.id) sendLibraryItem(tile.dataset.id);
   });
 
+  // ---- aba Figurinhas: busca no GIPHY, link colado e favoritas do WhatsApp ----
+  //
+  // Um campo só: texto comum busca figurinhas no GIPHY (fundo transparente);
+  // um link (X/Twitter ou GIPHY) vira o botão "Criar". Tocar num resultado
+  // da busca CRIA a figurinha na coleção (não manda) - de lá ela é mandada
+  // como qualquer outra.
+  let stickerQuery = '';
+  let stickerNextOffset = null;
+  let stickerLoading = false;
+  let stickerSearchTimer = null;
+  let stickerCreateBusy = false;
+  const stickerResults = new Map();
+
+  function looksLikeLink(text) {
+    return /^\s*(https?:\/\/|www\.|(x|twitter|giphy)\.com\/)/i.test(text);
+  }
+
+  function syncStickerHeader() {
+    const canLink = stickerToolsEnabled || giphyEnabled;
+    stickerSearchForm.classList.toggle('hidden', !canLink);
+    stickerSearchInput.placeholder = giphyEnabled ? 'Buscar ou colar link' : 'Colar link do X ou do GIPHY';
+    stickerGiphyAttrib.classList.toggle('hidden', !giphyEnabled || looksLikeLink(stickerSearchInput.value));
+    stickerLinkBtn.classList.toggle('hidden', !looksLikeLink(stickerSearchInput.value));
+    waImportBtn.classList.toggle('hidden', !waImportEnabled || stickerMode !== 'saved');
+  }
+
+  function backToSavedStickers() {
+    stickerMode = 'saved';
+    stickerQuery = '';
+    stickerResults.clear();
+    renderLibrary();
+    syncStickerHeader();
+  }
+
+  async function loadStickerPage() {
+    if (stickerLoading || stickerMode !== 'search' || stickerNextOffset === null) return;
+    stickerLoading = true;
+    const query = stickerQuery;
+    try {
+      const res = await fetch(api(`/api/stickers/giphy-search?q=${encodeURIComponent(query)}&offset=${stickerNextOffset}`));
+      const data = await res.json().catch(() => ({}));
+      if (stickerMode !== 'search' || query !== stickerQuery) return;
+      if (!res.ok) throw new Error(data.message || 'A busca de figurinhas falhou.');
+      const frag = document.createDocumentFragment();
+      for (const item of data.items || []) {
+        if (stickerResults.has(item.id)) continue;
+        stickerResults.set(item.id, item);
+        const tile = document.createElement('button');
+        tile.type = 'button';
+        tile.className = 'sticker-tile sticker-result';
+        tile.dataset.result = item.id;
+        tile.title = item.title ? `${item.title} (toque pra salvar)` : 'Toque pra salvar como figurinha';
+        const img = document.createElement('img');
+        img.loading = 'lazy';
+        img.decoding = 'async';
+        img.draggable = false;
+        img.alt = item.title || 'Figurinha';
+        img.src = api(`/api/gifs/preview?u=${encodeURIComponent(item.preview)}`);
+        img.addEventListener('load', () => img.classList.add('is-loaded'));
+        img.addEventListener('error', () => tile.remove());
+        tile.appendChild(img);
+        frag.appendChild(tile);
+      }
+      stickerGrid.appendChild(frag);
+      stickerNextOffset = data.nextOffset == null ? null : data.nextOffset;
+      if (!stickerGrid.children.length) {
+        stickerEmpty.textContent = 'Nenhuma figurinha encontrada pra essa busca.';
+        stickerEmpty.classList.remove('hidden');
+      }
+    } catch (e) {
+      stickerNextOffset = null;
+      if (stickerMode === 'search' && query === stickerQuery && !stickerGrid.children.length) {
+        stickerEmpty.textContent = e.message || 'A busca de figurinhas falhou.';
+        stickerEmpty.classList.remove('hidden');
+      }
+    } finally {
+      stickerLoading = false;
+    }
+  }
+
+  function runStickerSearch(raw) {
+    const query = String(raw || '').trim();
+    if (!query || looksLikeLink(query) || !giphyEnabled) {
+      if (stickerMode !== 'saved') backToSavedStickers();
+      return;
+    }
+    if (stickerMode === 'search' && query === stickerQuery) return;
+    stickerMode = 'search';
+    stickerQuery = query;
+    stickerNextOffset = 0;
+    stickerResults.clear();
+    stickerGrid.replaceChildren();
+    stickerEmpty.classList.add('hidden');
+    waImportBtn.classList.add('hidden');
+    stickerScroll.scrollTop = 0;
+    loadStickerPage();
+  }
+
+  // Link (X, GIPHY) ou resultado da busca: o servidor baixa e converte.
+  async function createStickerFromUrl(url, label) {
+    if (!myName()) {
+      focusNameInput();
+      return false;
+    }
+    if (stickerCreateBusy) return false;
+    stickerCreateBusy = true;
+    stickerLinkBtn.disabled = true;
+    uploadProgress.textContent = label || 'Criando figurinha...';
+    uploadProgress.classList.remove('hidden');
+    try {
+      const res = await fetch(api('/api/stickers/from-link'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sender: myName(), url }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        toast(data.message || 'Não foi possível criar essa figurinha.');
+        return false;
+      }
+      mergeLibraryItem(data.sticker);
+      toast(data.duplicate ? 'Essa figurinha já estava na coleção.' : 'Figurinha criada.');
+      return true;
+    } catch (e) {
+      toast('Erro de conexão ao criar a figurinha.');
+      return false;
+    } finally {
+      stickerCreateBusy = false;
+      stickerLinkBtn.disabled = false;
+      uploadProgress.classList.add('hidden');
+    }
+  }
+
+  function createStickerFromGiphy(item) {
+    if (!item) return;
+    createStickerFromUrl(item.url, 'Salvando figurinha do GIPHY...');
+  }
+
+  stickerSearchInput.addEventListener('input', () => {
+    syncStickerHeader();
+    clearTimeout(stickerSearchTimer);
+    const value = stickerSearchInput.value;
+    if (looksLikeLink(value)) {
+      if (stickerMode !== 'saved') backToSavedStickers();
+      return;
+    }
+    stickerSearchTimer = setTimeout(() => runStickerSearch(value), 450);
+  });
+  stickerSearchForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    clearTimeout(stickerSearchTimer);
+    const value = stickerSearchInput.value.trim();
+    if (!looksLikeLink(value)) {
+      runStickerSearch(value);
+      return;
+    }
+    const link = /^https?:\/\//i.test(value) ? value : `https://${value}`;
+    if (await createStickerFromUrl(link, 'Baixando e criando a figurinha...')) {
+      stickerSearchInput.value = '';
+      syncStickerHeader();
+    }
+  });
+
+  new IntersectionObserver((entries) => {
+    if (entries.some((en) => en.isIntersecting)) loadStickerPage();
+  }, { root: stickerScroll, rootMargin: '300px 0px' }).observe(stickerSentinel);
+
+  // Favoritas do WhatsApp do Mac: o servidor vai de 25 em 25 e aqui mostra
+  // o progresso. Pode repetir quando quiser - o que já está não duplica.
+  let waImportBusy = false;
+  waImportBtn.addEventListener('click', async () => {
+    if (!myName()) {
+      focusNameInput();
+      return;
+    }
+    if (waImportBusy) return;
+    waImportBusy = true;
+    waImportBtn.disabled = true;
+    let offset = 0;
+    let total = 0;
+    let added = 0;
+    let duplicates = 0;
+    let missing = 0;
+    let full = false;
+    let error = '';
+    try {
+      for (;;) {
+        uploadProgress.textContent = total
+          ? `Importando favoritas do WhatsApp... ${Math.min(offset, total)} de ${total}`
+          : 'Lendo as favoritas do WhatsApp...';
+        uploadProgress.classList.remove('hidden');
+        const res = await fetch(api('/api/stickers/import-whatsapp'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sender: myName(), offset }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) {
+          error = data.message || 'Não foi possível importar agora.';
+          break;
+        }
+        total = data.total || 0;
+        added += data.added || 0;
+        duplicates += data.duplicates || 0;
+        missing += data.missing || 0;
+        full = full || !!data.full;
+        if (data.nextOffset == null) break;
+        offset = data.nextOffset;
+      }
+    } catch (e) {
+      error = 'Erro de conexão durante a importação.';
+    } finally {
+      waImportBusy = false;
+      waImportBtn.disabled = false;
+      uploadProgress.classList.add('hidden');
+    }
+    refreshLibrary();
+    if (error && !added) {
+      toast(error);
+      return;
+    }
+    const parts = [];
+    parts.push(added === 1 ? '1 figurinha importada' : `${added} figurinhas importadas`);
+    if (duplicates) parts.push(duplicates === 1 ? '1 já estava aqui' : `${duplicates} já estavam aqui`);
+    if (missing) parts.push(missing === 1 ? '1 não está salva neste Mac' : `${missing} não estão salvas neste Mac`);
+    let msg = `${parts.join(', ')}.`;
+    if (full) msg += ' A coleção encheu antes de terminar.';
+    else if (missing) msg += ' Abra as favoritas no WhatsApp do Mac pra ele baixar e importe de novo.';
+    toast(msg, 7000);
+  });
+
   // Toque longo / clique direito num item salvo: "Remover da coleção".
   attachMenuGestures(stickerGrid, stickerScroll, (e) => {
-    const tile = e.target.closest('.sticker-tile');
+    const tile = e.target.closest('.sticker-tile[data-id]');
     return tile ? { el: tile, id: tile.dataset.id } : null;
   }, (id, at) => openLibraryMenu(id, at, stickerScroll));
   attachMenuGestures(gifGrid, gifScroll, (e) => {

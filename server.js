@@ -15,6 +15,9 @@ const { EventEmitter } = require('events');
 const { Store, WrongCodeError } = require('./lib/store');
 const auth = require('./lib/auth');
 const { randomId } = require('./lib/crypto');
+const stickerTools = require('./lib/sticker-tools');
+const stickerLinks = require('./lib/sticker-links');
+const waFavorites = require('./lib/whatsapp-favorites');
 
 const PORT = parseInt(process.env.PORT || '4177', 10);
 // Default fica em 127.0.0.1 (só a própria máquina). Setar HOST=0.0.0.0 expõe
@@ -1138,6 +1141,8 @@ roomRouter.get('/api/boot', requireAuth, (req, res) => {
       quickReactions: Array.isArray(mine.quickReactions) ? mine.quickReactions : DEFAULT_QUICK_REACTIONS,
       stickers: (data.stickers || []).map(publicSticker),
       giphy: !!GIPHY_API_KEY,
+      stickerTools: stickerTools.available(),
+      waImport: waFavorites.enabled(),
       hermes: HERMES_HASH ? { salt: HERMES_SALT, hash: HERMES_HASH } : null,
     });
   } catch (e) {
@@ -1339,6 +1344,208 @@ roomRouter.post('/api/stickers/:id/send', requireAuth, express.json(), (req, res
   }
 });
 
+// ===== Figurinha feita no servidor: vídeo/GIF da galeria, link, GIPHY, WhatsApp =====
+// A conversão (lib/sticker-tools.js) usa o ffmpeg e o webp do próprio Mac;
+// sem eles, só o caminho antigo (imagem reduzida no navegador) continua.
+const MAX_CONVERT_UPLOAD = 60 * 1024 * 1024;
+const uploadConvert = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: MAX_CONVERT_UPLOAD },
+}).single('file');
+
+function cleanSender(raw) {
+  return String(raw || '').trim().slice(0, 60);
+}
+
+function ffmpegDir() {
+  const bin = stickerTools.tools().ffmpeg;
+  return bin ? path.dirname(bin) : null;
+}
+
+// Mensagem de erro que pode ir pra tela: as nossas (em português) passam;
+// a saída crua de ffmpeg/img2webp fica só no log.
+function friendlyConvertError(e) {
+  if (e && e.user && e.message) return e.message;
+  if (e && e.message) console.error('figurinha:', e.message);
+  return 'Não consegui transformar isso em figurinha.';
+}
+
+// Guarda uma figurinha já convertida na coleção. Não persiste: quem chama
+// junta tudo e grava uma vez só.
+function addStickerBuffer(req, data, sticker, sender, extra) {
+  const list = data.stickers || [];
+  const hash = crypto.createHash('sha256').update(sticker.buffer).digest('hex');
+  const existing = list.find((s) => s.kind === 'sticker' && s.hash === hash);
+  if (existing) return { item: existing, duplicate: true };
+  if (list.length >= MAX_LIBRARY_ITEMS) return { error: 'full' };
+  if (sticker.buffer.length > MAX_STICKER_BYTES) return { error: 'too_large' };
+  const mediaId = randomId(16);
+  store.saveMedia(req.session.key, mediaId, sticker.buffer);
+  const item = {
+    id: randomId(8),
+    kind: 'sticker',
+    mediaId,
+    mimeType: sticker.mimeType,
+    size: sticker.buffer.length,
+    hash,
+    addedBy: sender,
+    ts: Date.now(),
+    ...extra,
+  };
+  if (sticker.width && sticker.height) {
+    item.width = sticker.width;
+    item.height = sticker.height;
+  }
+  addLibraryItem(data, item);
+  return { item, duplicate: false };
+}
+
+const LIBRARY_ERRORS = {
+  full: [400, 'A coleção está cheia. Remova algum item antes.'],
+  too_large: [413, 'A figurinha ficou grande demais pra coleção.'],
+};
+
+async function createStickerResponse(req, res, getBuffer, sender, extra) {
+  let sticker;
+  try {
+    sticker = await stickerTools.toSticker(await getBuffer(), { passthroughMax: MAX_STICKER_BYTES });
+  } catch (e) {
+    const status = e && e.code === 'NO_TOOLS' ? 501 : 422;
+    return res.status(status).json({ error: 'convert', message: friendlyConvertError(e) });
+  }
+  try {
+    // A conversão demora: só agora lê a conversa, pra não gravar por cima
+    // de algo que o outro lado mandou nesse meio-tempo.
+    const data = loadWithSessionKey(req);
+    const r = addStickerBuffer(req, data, sticker, sender, extra);
+    if (r.error) {
+      const [status, message] = LIBRARY_ERRORS[r.error];
+      return res.status(status).json({ error: r.error, message });
+    }
+    if (!r.duplicate) {
+      store.persist(req.session.key, data);
+      bus.emit('stickers-changed', {});
+    }
+    res.json({ ok: true, sticker: publicSticker(r.item), duplicate: r.duplicate });
+  } catch (e) {
+    console.error(e);
+    res.status(401).json({ error: 'unauthenticated' });
+  }
+}
+
+// Vídeo, GIF ou imagem da galeria -> figurinha (animada quando a entrada é).
+roomRouter.post('/api/stickers/convert', requireAuth, (req, res) => {
+  uploadConvert(req, res, (err) => {
+    if (err) {
+      const big = err.code === 'LIMIT_FILE_SIZE';
+      return res.status(big ? 413 : 400).json({
+        error: big ? 'too_large' : 'invalid',
+        message: big ? 'Arquivo grande demais pra virar figurinha (máx. 60 MB).' : 'Envio inválido.',
+      });
+    }
+    const sender = cleanSender(req.body && req.body.sender);
+    const file = req.file;
+    if (!file || !sender) return res.status(400).json({ error: 'invalid' });
+    const mime = file.mimetype || '';
+    if (!mime.startsWith('image/') && !mime.startsWith('video/')) {
+      return res.status(400).json({ error: 'invalid', message: 'Só imagem, GIF ou vídeo vira figurinha.' });
+    }
+    createStickerResponse(req, res, async () => file.buffer, sender, { source: 'galeria' });
+  });
+});
+
+// Link do X/Twitter ou do GIPHY (página, arquivo, ou resultado da busca).
+roomRouter.post('/api/stickers/from-link', requireAuth, (req, res) => {
+  const sender = cleanSender(req.body && req.body.sender);
+  const url = String((req.body && req.body.url) || '').trim().slice(0, 2000);
+  if (!url || !sender) return res.status(400).json({ error: 'invalid' });
+  const extra = { source: 'link' };
+  createStickerResponse(req, res, async () => {
+    const got = await stickerLinks.fetchLinkMedia(url, {
+      giphyKey: GIPHY_API_KEY,
+      giphyBase: GIPHY_API_BASE,
+      giphyExtraOrigin: GIPHY_EXTRA_ORIGIN,
+      ffmpegDir: ffmpegDir(),
+    });
+    extra.source = got.source;
+    return got.buffer;
+  }, sender, extra);
+});
+
+// Favoritas do WhatsApp deste Mac (só com WHATSAPP_IMPORT=1). Vai em lotes:
+// o celular pede de 25 em 25 e mostra o progresso, em vez de uma requisição
+// só que estoura o tempo do túnel. Repetir é seguro: o que já está na coleção
+// (mesmo arquivo) não entra de novo.
+const WA_BATCH = 25;
+let waImportBusy = false;
+roomRouter.post('/api/stickers/import-whatsapp', requireAuth, async (req, res) => {
+  if (!waFavorites.enabled()) return res.status(404).json({ error: 'disabled' });
+  const sender = cleanSender(req.body && req.body.sender);
+  const offset = Math.max(0, parseInt(req.body && req.body.offset, 10) || 0);
+  if (!sender) return res.status(400).json({ error: 'invalid' });
+  if (waImportBusy) return res.status(429).json({ error: 'busy', message: 'Já tem uma importação rodando.' });
+  waImportBusy = true;
+  try {
+    let favs;
+    let locals;
+    try {
+      favs = await waFavorites.listFavorites();
+      locals = await waFavorites.localFiles();
+    } catch (e) {
+      return res.status(502).json({ error: 'whatsapp', message: e.message || 'Não consegui ler o WhatsApp deste Mac.' });
+    }
+    const batch = favs.slice(offset, offset + WA_BATCH);
+    const ready = [];
+    let missing = 0;
+    for (let i = 0; i < batch.length; i++) {
+      const buf = await waFavorites.loadFavorite(batch[i], locals);
+      let sticker = null;
+      if (buf) {
+        try {
+          sticker = await stickerTools.toSticker(buf, { passthroughMax: MAX_STICKER_BYTES });
+        } catch (e) {
+          sticker = null;
+        }
+      }
+      if (sticker) ready.push({ sticker, order: offset + i });
+      else missing += 1;
+    }
+    const data = loadWithSessionKey(req);
+    let added = 0;
+    let duplicates = 0;
+    let full = false;
+    const now = Date.now();
+    for (const { sticker, order } of ready) {
+      // ts decrescente na ordem do WhatsApp: a favorita mais recente lá
+      // aparece primeiro na bandeja.
+      const r = addStickerBuffer(req, data, sticker, sender, { source: 'whatsapp', ts: now - order });
+      if (r.error === 'full') { full = true; break; }
+      if (r.error) missing += 1;
+      else if (r.duplicate) duplicates += 1;
+      else added += 1;
+    }
+    if (added) {
+      store.persist(req.session.key, data);
+      bus.emit('stickers-changed', {});
+    }
+    const next = offset + WA_BATCH;
+    res.json({
+      ok: true,
+      total: favs.length,
+      added,
+      duplicates,
+      missing,
+      full,
+      nextOffset: !full && next < favs.length ? next : null,
+    });
+  } catch (e) {
+    console.error(e);
+    res.status(401).json({ error: 'unauthenticated' });
+  } finally {
+    waImportBusy = false;
+  }
+});
+
 // ===== Busca de GIF (GIPHY, opcional) =====
 function isAllowedGifUrl(raw) {
   let u;
@@ -1395,7 +1602,9 @@ function pickGifRendition(images, names) {
   return null;
 }
 
-roomRouter.get('/api/gifs/search', requireAuth, async (req, res) => {
+// Mesma busca pros GIFs e pras figurinhas do GIPHY (as figurinhas têm fundo
+// transparente; o endpoint deles é outro, o formato da resposta é o mesmo).
+async function giphySearch(req, res, type) {
   if (!GIPHY_API_KEY) return res.status(404).json({ error: 'disabled' });
   const q = String((req.query && req.query.q) || '').trim().slice(0, 80);
   const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
@@ -1405,8 +1614,8 @@ roomRouter.get('/api/gifs/search', requireAuth, async (req, res) => {
     limit: String(limit),
     offset: String(offset),
     rating: GIPHY_RATING,
-    bundle: 'messaging_non_clips',
   });
+  if (type === 'gifs') params.set('bundle', 'messaging_non_clips');
   if (q) {
     params.set('q', q);
     params.set('lang', 'pt');
@@ -1414,8 +1623,8 @@ roomRouter.get('/api/gifs/search', requireAuth, async (req, res) => {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 10000);
   try {
-    const r = await fetch(`${GIPHY_API_BASE}/v1/gifs/${q ? 'search' : 'trending'}?${params}`, { signal: controller.signal });
-    if (!r.ok) return res.status(502).json({ error: 'giphy', message: 'A busca de GIFs não respondeu.' });
+    const r = await fetch(`${GIPHY_API_BASE}/v1/${type}/${q ? 'search' : 'trending'}?${params}`, { signal: controller.signal });
+    if (!r.ok) return res.status(502).json({ error: 'giphy', message: 'A busca do GIPHY não respondeu.' });
     const body = await r.json();
     const items = [];
     for (const g of body.data || []) {
@@ -1434,11 +1643,14 @@ roomRouter.get('/api/gifs/search', requireAuth, async (req, res) => {
     const total = (body.pagination && body.pagination.total_count) || 0;
     res.json({ items, nextOffset: offset + limit < total ? offset + limit : null });
   } catch (e) {
-    res.status(502).json({ error: 'giphy', message: 'A busca de GIFs não respondeu.' });
+    res.status(502).json({ error: 'giphy', message: 'A busca do GIPHY não respondeu.' });
   } finally {
     clearTimeout(timer);
   }
-});
+}
+
+roomRouter.get('/api/gifs/search', requireAuth, (req, res) => giphySearch(req, res, 'gifs'));
+roomRouter.get('/api/stickers/giphy-search', requireAuth, (req, res) => giphySearch(req, res, 'stickers'));
 
 // Prévia de um resultado da busca, repassada pelo servidor.
 roomRouter.get('/api/gifs/preview', requireAuth, async (req, res) => {

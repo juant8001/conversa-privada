@@ -154,9 +154,16 @@
       <div id="tray-emoji-scroll" class="emoji-scroll"></div>
     </div>
     <div id="tray-stickers" class="tray-pane hidden" data-pane="stickers">
+      <form id="sticker-search-form" class="gif-search hidden">
+        <input id="sticker-search-input" type="search" placeholder="Buscar ou colar link" autocomplete="off" autocapitalize="off" enterkeyhint="go" />
+        <button id="sticker-link-btn" type="submit" class="sticker-link-btn hidden">Criar</button>
+        <span id="sticker-giphy-attrib" class="giphy-attrib hidden">GIPHY</span>
+      </form>
       <div id="sticker-scroll" class="tray-scroll">
+        <button id="wa-import-btn" type="button" class="wa-import-btn hidden">Importar favoritas do WhatsApp</button>
         <div id="sticker-grid" class="sticker-grid"></div>
-        <p id="sticker-empty" class="tray-empty hidden">Nenhuma figurinha ainda. Toque no + pra criar a primeira a partir de uma imagem — ou segure uma foto na conversa e escolha “Criar figurinha”.</p>
+        <p id="sticker-empty" class="tray-empty hidden">Nenhuma figurinha ainda. Toque no + pra criar a partir de uma foto, vídeo ou GIF da galeria, cole um link do X ou do GIPHY no campo acima — ou segure uma foto na conversa e escolha “Criar figurinha”.</p>
+        <div id="sticker-sentinel" class="media-sentinel"></div>
       </div>
     </div>
     <div id="tray-gifs" class="tray-pane hidden" data-pane="gifs">
@@ -170,7 +177,7 @@
         <div id="gif-sentinel" class="media-sentinel"></div>
       </div>
     </div>
-    <input id="sticker-file-input" type="file" hidden multiple accept="image/*" />
+    <input id="sticker-file-input" type="file" hidden multiple accept="image/*,video/*" />
     <input id="gif-file-input" type="file" hidden multiple accept="image/gif,image/webp" />
   </div>
 </div>
