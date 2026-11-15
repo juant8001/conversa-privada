@@ -2334,6 +2334,33 @@ body::before {
   max-width: 900px;
   margin: 0 auto;
 }
+.wa-section {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 10px 0 0;
+  padding: 0 2px;
+}
+.wa-section:first-child { margin-top: 0; }
+.wa-section-title { font-size: 14px; font-weight: 600; color: var(--ink); }
+.wa-section-sub { display: block; font-size: 12px; font-weight: 400; color: var(--muted); }
+.wa-section-all {
+  flex: none;
+  border: none;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 4px 2px;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+  touch-action: manipulation;
+}
+.wa-section-all:disabled { opacity: 0.5; cursor: default; }
 .wa-tile {
   position: relative;
   aspect-ratio: 1;

@@ -1472,8 +1472,10 @@ roomRouter.post('/api/stickers/from-link', requireAuth, (req, res) => {
   }, sender, extra);
 });
 
-// Favoritas do WhatsApp deste Mac (só com WHATSAPP_IMPORT=1). A pessoa vê
-// as favoritas numa tela, escolhe quais quer e importa. Pode voltar quando
+// Figurinhas do WhatsApp deste Mac (só com WHATSAPP_IMPORT=1): as favoritas
+// e, desde a v49, todas as que passaram por conversas (as que a pessoa
+// mandou, inclusive as que criou, e as que recebeu). A pessoa vê tudo numa
+// tela, separado por grupo, escolhe quais quer e importa. Pode voltar quando
 // quiser: a tela só oferece as que ainda não estão na coleção (v48 - antes
 // era uma vez só; o data.waImportDone antigo agora é ignorado). As prévias
 // saem da mesma varredura que a importação usa (lib/whatsapp-favorites.js,
@@ -1513,7 +1515,8 @@ roomRouter.get('/api/stickers/whatsapp-favorites', requireAuth, async (req, res)
   res.json({
     total: result.total,
     missing: result.missing,
-    items: result.items.map((it) => ({ key: it.key, inLibrary: have.has(it.key) })),
+    groups: result.groups,
+    items: result.items.map((it) => ({ key: it.key, group: it.group, inLibrary: have.has(it.key) })),
   });
 });
 

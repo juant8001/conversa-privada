@@ -55,9 +55,30 @@ const WA_KEY_BLUE = crypto.randomBytes(32);
 const WA_ENC_BLUE = waEncrypt(WEBP_BLUE, WA_KEY_BLUE);
 // A favorita "perdida" chegando de novo numa conversa (mandada do celular):
 // a mensagem traz link novo e chave própria.
-const WA_SUMIU = Buffer.from('sumiu');
+// Cabeçalho de WebP com recheio qualquer: só aparece na lista, não é importada.
+const fakeWebp = (txt) => Buffer.concat([Buffer.from('RIFF'), Buffer.alloc(4), Buffer.from(`WEBP${txt}`)]);
+const WA_SUMIU = fakeWebp('sumiu');
 const WA_KEY_MSG = crypto.randomBytes(32);
 const WA_ENC_MSG = waEncrypt(WA_SUMIU, WA_KEY_MSG);
+// Figurinhas que só passaram por conversas (v49): uma que o Juan mandou
+// (criada por ele; WebP de verdade, importável) e uma que ele recebeu.
+// A chave da mensagem vai no formato real do ChatStorage (protobuf).
+function webpWithExtraChunk(base, tag) {
+  const chunk = Buffer.concat([Buffer.from(tag), Buffer.from([4, 0, 0, 0]), Buffer.from('oi!!')]);
+  const out = Buffer.concat([base, chunk]);
+  out.writeUInt32LE(out.length - 8, 4);
+  return out;
+}
+const WEBP_CRIADA = webpWithExtraChunk(WEBP_RED, 'XTRA');
+const WA_KEY_CRIADA = crypto.randomBytes(32);
+const WA_ENC_CRIADA = waEncrypt(WEBP_CRIADA, WA_KEY_CRIADA);
+const WA_RECEBIDA = fakeWebp('recebida');
+const WA_KEY_RECEBIDA = crypto.randomBytes(32);
+const WA_ENC_RECEBIDA = waEncrypt(WA_RECEBIDA, WA_KEY_RECEBIDA);
+const WA_LOTTIE = Buffer.from('PK\x03\x04lottie');
+const WA_KEY_LOTTIE = crypto.randomBytes(32);
+const WA_ENC_LOTTIE = waEncrypt(WA_LOTTIE, WA_KEY_LOTTIE);
+const encShaOf = (enc) => crypto.createHash('sha256').update(enc).digest();
 
 function pbVarint(n) {
   const out = [];
@@ -75,6 +96,9 @@ function pbField(no, value) {
   const buf = Buffer.isBuffer(value) ? value : Buffer.from(String(value));
   return Buffer.concat([pbVarint((no << 3) | 2), pbVarint(buf.length), buf]);
 }
+
+// ZMEDIAKEY como o WhatsApp do Mac grava: { 1: chave, 2: sha256 do cifrado, 3: data }.
+const mediaKeyBlob = (key, enc) => Buffer.concat([pbField(1, key), pbField(2, encShaOf(enc)), pbField(3, 1700000000)]).toString('hex');
 
 // Contêiner falso do WhatsApp do Mac: 3 favoritas valendo (uma com arquivo
 // no disco, uma só no servidor de mídia, uma perdida) e uma desfavoritada.
@@ -100,7 +124,7 @@ function makeFakeWhatsApp(mediaOrigin) {
     'create table ZAPPSTATECONFIRMEDMUTATIONENTITY (Z_PK integer primary key, ZVERSION integer, ZACTIONNAME varchar, ZINDEX blob, ZVALUE blob);',
     fav(b64sha(WEBP_RED), { directPath: '/v/red', ts: 3000 }),
     fav(b64sha(WEBP_BLUE), { key: WA_KEY_BLUE, encSha: crypto.createHash('sha256').update(WA_ENC_BLUE).digest(), directPath: '/v/blue', ts: 2000 }),
-    fav(b64sha(Buffer.from('sumiu')), { directPath: '/v/sumiu', ts: 1000 }),
+    fav(b64sha(WA_SUMIU), { directPath: '/v/sumiu', ts: 1000 }),
     fav(b64sha(Buffer.from('desfavoritada')), { directPath: '/v/x', ts: 500, isFavorite: 0 }),
     "insert into ZAPPSTATECONFIRMEDMUTATIONENTITY (ZVERSION, ZACTIONNAME, ZINDEX, ZVALUE) values (1, 'star', 'x', X'00');",
   ].join('\n');
@@ -111,11 +135,21 @@ insert into ZWACDSTICKER (ZFILEHASH, ZRELATIVEIMAGEPATH) values ('${b64sha(WEBP_
   });
   // Conversas: a vermelha já passou por uma (arquivo apagado, link morto).
   execFileSync('sqlite3', [path.join(dir, 'ChatStorage.sqlite')], {
-    input: `create table ZWAMESSAGE (Z_PK integer primary key, ZMESSAGETYPE integer);
+    input: `create table ZWAMESSAGE (Z_PK integer primary key, ZMESSAGETYPE integer, ZISFROMME integer, ZMESSAGEDATE timestamp);
 create table ZWAMEDIAITEM (Z_PK integer primary key, ZMESSAGE integer, ZVCARDNAME varchar, ZMEDIALOCALPATH varchar, ZMEDIAURL varchar, ZMEDIAKEY blob, ZMEDIAURLDATE timestamp);
-insert into ZWAMESSAGE values (1, 15);
+insert into ZWAMESSAGE values (1, 15, 0, 100);
 insert into ZWAMEDIAITEM values (1, 1, '${b64sha(WEBP_RED)}', 'Media/x/apagado.webp', '${mediaOrigin}/wa/morto', X'${crypto.randomBytes(32).toString('hex')}', 10);
-insert into ZWAMESSAGE values (2, 0);`,
+insert into ZWAMESSAGE values (2, 0, 0, 110);
+insert into ZWAMESSAGE values (4, 15, 1, 250);
+insert into ZWAMEDIAITEM values (4, 4, '${b64sha(WEBP_CRIADA)}', null, '${mediaOrigin}/wa/msg/criada', X'${mediaKeyBlob(WA_KEY_CRIADA, WA_ENC_CRIADA)}', 250);
+insert into ZWAMESSAGE values (5, 15, 0, 200);
+insert into ZWAMEDIAITEM values (5, 5, '${b64sha(WA_RECEBIDA)}', null, '${mediaOrigin}/wa/msg/recebida', X'${mediaKeyBlob(WA_KEY_RECEBIDA, WA_ENC_RECEBIDA)}', 200);
+insert into ZWAMESSAGE values (6, 15, 1, 260);
+insert into ZWAMEDIAITEM values (6, 6, '${b64sha(Buffer.from('antiga'))}', null, 'https://a.whatsapp.net', X'${mediaKeyBlob(crypto.randomBytes(32), Buffer.from('x'))}', 260);
+insert into ZWAMESSAGE values (7, 15, 0, 190);
+insert into ZWAMEDIAITEM values (7, 7, '${b64sha(Buffer.from('expirada'))}', null, '${mediaOrigin}/wa/msg/expirada', X'${mediaKeyBlob(crypto.randomBytes(32), Buffer.from('x'))}', 190);
+insert into ZWAMESSAGE values (8, 15, 0, 180);
+insert into ZWAMEDIAITEM values (8, 8, '${b64sha(WA_LOTTIE)}', null, '${mediaOrigin}/wa/msg/lottie', X'${mediaKeyBlob(WA_KEY_LOTTIE, WA_ENC_LOTTIE)}', 180);`,
   });
   return dir;
 }
@@ -123,8 +157,8 @@ insert into ZWAMESSAGE values (2, 0);`,
 // Simula o Juan mandando a figurinha "perdida" do celular pra uma conversa.
 function waReceiveFromPhone(dir, mediaOrigin) {
   execFileSync('sqlite3', [path.join(dir, 'ChatStorage.sqlite')], {
-    input: `insert into ZWAMESSAGE values (3, 15);
-insert into ZWAMEDIAITEM values (2, 3, '${b64sha(WA_SUMIU)}', null, '${mediaOrigin}/wa/msg/sumiu', X'${WA_KEY_MSG.toString('hex')}', 20);`,
+    input: `insert into ZWAMESSAGE values (3, 15, 1, 300);
+insert into ZWAMEDIAITEM values (2, 3, '${b64sha(WA_SUMIU)}', null, '${mediaOrigin}/wa/msg/sumiu', X'${mediaKeyBlob(WA_KEY_MSG, WA_ENC_MSG)}', 20);`,
   });
 }
 
@@ -169,6 +203,15 @@ function startFakeGiphy() {
         res.end(WA_ENC_BLUE);
       } else if (req.url === '/wa/msg/sumiu') {
         res.end(WA_ENC_MSG);
+      } else if (req.url === '/wa/msg/criada') {
+        res.end(WA_ENC_CRIADA);
+      } else if (req.url === '/wa/msg/recebida') {
+        res.end(WA_ENC_RECEBIDA);
+      } else if (req.url === '/wa/msg/lottie') {
+        res.end(WA_ENC_LOTTIE);
+      } else if (req.url === '/wa/msg/expirada') {
+        res.statusCode = 403;
+        res.end();
       } else {
         res.statusCode = 404;
         res.end();
@@ -500,12 +543,23 @@ async function main() {
     check('coleção ganhou só 1 item (o resto era o mesmo arquivo)', r.json.stickers.length === before + 1, r.json.stickers.length);
 
     if (waDir) {
-      console.log('\n# favoritas do WhatsApp (contêiner falso)');
+      console.log('\n# figurinhas do WhatsApp (contêiner falso)');
       const redKey = crypto.createHash('sha256').update(WEBP_RED).digest('hex');
       const blueKey = crypto.createHash('sha256').update(WEBP_BLUE).digest('hex');
+      const criadaKey = crypto.createHash('sha256').update(WEBP_CRIADA).digest('hex');
+      const recebidaKey = crypto.createHash('sha256').update(WA_RECEBIDA).digest('hex');
+      const favItems = (j) => j.items.filter((it) => it.group === 'fav');
       r = await juan('GET', '/api/stickers/whatsapp-favorites');
-      check('lista pra escolher: 2 com arquivo (local e baixada), 1 perdida', r.res.status === 200 && r.json.total === 3
-        && r.json.missing === 1 && r.json.items.length === 2 && r.json.items[0].key === redKey && r.json.items[1].key === blueKey, r.json);
+      check('favoritas: 2 com arquivo (local e baixada), 1 perdida', r.res.status === 200 && r.json.groups.fav.total === 3
+        && r.json.groups.fav.missing === 1 && favItems(r.json).length === 2 && r.json.items[0].key === redKey && r.json.items[1].key === blueKey, r.json);
+      check('as que ele mandou (criadas) vêm das conversas, com a chave no formato do ChatStorage', r.json.groups.mine.total === 2
+        && r.json.groups.mine.missing === 1 && r.json.items[2].key === criadaKey && r.json.items[2].group === 'mine', r.json);
+      check('as recebidas vêm por último; link expirado e Lottie ficam de fora', r.json.groups.chat.total === 3
+        && r.json.groups.chat.missing === 2 && r.json.items.length === 4 && r.json.items[3].key === recebidaKey && r.json.items[3].group === 'chat', r.json);
+      r = await juan('GET', `/api/stickers/whatsapp-favorites/${criadaKey}`, undefined, { raw: true });
+      check('prévia da criada (baixada da conversa) chega igual', r.res.status === 200 && r.buf.equals(WEBP_CRIADA));
+      r = await juan('POST', '/api/stickers/import-whatsapp', { sender: 'Juan', keys: [criadaKey] });
+      check('importa figurinha que só passou por conversa', r.res.status === 200 && r.json.added === 1, r.json);
       r = await juan('GET', `/api/stickers/whatsapp-favorites/${blueKey}`, undefined, { raw: true });
       check('prévia da favorita (baixada e decifrada) chega igual', r.res.status === 200 && r.buf.equals(WEBP_BLUE)
         && r.res.headers.get('content-type') === 'image/webp' && (r.res.headers.get('content-security-policy') || '').includes('sandbox'));
@@ -524,7 +578,7 @@ async function main() {
       check('importar de novo a mesma conta como repetida', r.res.status === 200 && r.json.added === 0 && r.json.duplicates === 1, r.json);
       r = await juan('GET', '/api/stickers');
       check('só a escolhida entrou; botão continua', r.json.waImport === true
-        && r.json.stickers.filter((st) => st.width === 2).length === 1, r.json.waImport);
+        && r.json.stickers.filter((st) => st.width === 2).length === 2, r.json.waImport);
       r = await teo('GET', '/api/boot?name=Teo');
       check('…pros dois', r.json.waImport === true);
       r = await juan('GET', `/api/stickers/whatsapp-favorites/${redKey}`, undefined, { raw: true });
@@ -532,12 +586,14 @@ async function main() {
       r = await juan('POST', '/api/stickers/import-whatsapp', { sender: 'Juan', keys: [redKey] });
       check('dá pra voltar e importar outra depois', r.res.status === 200 && r.json.added === 1, r.json);
       r = await juan('GET', '/api/stickers/whatsapp-favorites');
-      check('…e as duas aparecem como já na coleção', r.json.items.every((it) => it.inLibrary === true) && r.json.missing === 1, r.json);
+      check('…e as duas aparecem como já na coleção', favItems(r.json).every((it) => it.inLibrary === true) && r.json.groups.fav.missing === 1, r.json);
       waReceiveFromPhone(waDir, fakeOrigin);
       r = await juan('GET', '/api/stickers/whatsapp-favorites');
       const sumiuKey = crypto.createHash('sha256').update(WA_SUMIU).digest('hex');
-      check('a perdida aparece depois de chegar numa conversa (link da mensagem)', r.json.missing === 0
-        && r.json.items.length === 3 && r.json.items[2].key === sumiuKey && r.json.items[2].inLibrary === false, r.json);
+      check('a perdida aparece depois de chegar numa conversa (link da mensagem)', r.json.groups.fav.missing === 0
+        && favItems(r.json).length === 3 && r.json.items[2].key === sumiuKey && r.json.items[2].inLibrary === false, r.json);
+      check('…e continua no grupo das favoritas, não repete nas mandadas', r.json.items.filter((it) => it.key === sumiuKey).length === 1
+        && r.json.groups.mine.total === 2, r.json.groups);
       r = await anon('POST', '/api/stickers/import-whatsapp', { sender: 'x', keys: [] });
       check('importar exige sessão', r.res.status === 401);
       await juan('POST', '/api/clear');

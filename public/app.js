@@ -4574,8 +4574,10 @@
     if (entries.some((en) => en.isIntersecting)) loadStickerPage();
   }, { root: stickerScroll, rootMargin: '300px 0px' }).observe(stickerSentinel);
 
-  // Favoritas do WhatsApp do Mac: abre uma tela com as que dá pra trazer e
-  // ainda não estão na coleção; a pessoa marca as que quer e importa. Pode
+  // Figurinhas do WhatsApp do Mac: abre uma tela com as que dá pra trazer e
+  // ainda não estão na coleção, em três grupos (favoritas, as que a pessoa
+  // mandou - inclusive as que criou - e as recebidas nas conversas); a
+  // pessoa marca as que quer e importa. Pode
   // voltar quando quiser. As que o Mac não consegue baixar (link expirado)
   // aparecem depois que a pessoa manda a figurinha do celular pra qualquer
   // conversa - aí é tocar em Atualizar.
@@ -4589,7 +4591,12 @@
   const waSelectAll = document.getElementById('wa-select-all');
   const waImport = document.getElementById('wa-import');
   const waRefresh = document.getElementById('wa-refresh');
-  let waItems = [];               // [{ key, inLibrary }] - só as que faltam na coleção
+  let waItems = [];               // [{ key, group, inLibrary }] - só as que faltam na coleção
+  const WA_GROUPS = [
+    { id: 'fav', title: 'Favoritas' },
+    { id: 'mine', title: 'Que você mandou', sub: 'inclui as que você criou' },
+    { id: 'chat', title: 'Recebidas nas conversas' },
+  ];
   const waSelected = new Set();   // keys marcadas
   let waLoadSeq = 0;
   let waImportBusy = false;
@@ -4614,32 +4621,60 @@
     waRefresh.disabled = waImportBusy;
     waSelectAll.textContent = selectable.length && selectable.every((it) => waSelected.has(it.key))
       ? 'Nenhuma' : 'Todas';
+    waGrid.querySelectorAll('.wa-section-all').forEach((btn) => {
+      const items = waItems.filter((it) => it.group === btn.dataset.group);
+      btn.disabled = waImportBusy;
+      btn.textContent = items.length && items.every((it) => waSelected.has(it.key)) ? 'Desmarcar' : 'Marcar todas';
+    });
   }
 
   function renderWaGrid() {
-    const nodes = waItems.map((it) => {
-      const tile = document.createElement('button');
-      tile.type = 'button';
-      tile.className = 'wa-tile';
-      tile.dataset.key = it.key;
-      if (it.inLibrary) {
-        tile.classList.add('in-library');
-        tile.title = 'Já está na coleção';
-        tile.disabled = true;
-      } else if (waSelected.has(it.key)) {
-        tile.classList.add('is-selected');
+    const nodes = [];
+    for (const g of WA_GROUPS) {
+      const items = waItems.filter((it) => (it.group || 'fav') === g.id);
+      if (!items.length) continue;
+      const head = document.createElement('div');
+      head.className = 'wa-section';
+      const title = document.createElement('span');
+      title.className = 'wa-section-title';
+      title.textContent = `${g.title} (${items.length})`;
+      if (g.sub) {
+        const sub = document.createElement('span');
+        sub.className = 'wa-section-sub';
+        sub.textContent = g.sub;
+        title.appendChild(sub);
       }
-      const img = document.createElement('img');
-      img.loading = 'lazy';
-      img.decoding = 'async';
-      img.draggable = false;
-      img.alt = 'Figurinha';
-      img.src = api(`/api/stickers/whatsapp-favorites/${it.key}`);
-      tile.appendChild(img);
-      return tile;
-    });
+      const all = document.createElement('button');
+      all.type = 'button';
+      all.className = 'wa-section-all';
+      all.dataset.group = g.id;
+      head.append(title, all);
+      nodes.push(head, ...items.map(waTile));
+    }
     waGrid.replaceChildren(...nodes);
     syncWaFooter();
+  }
+
+  function waTile(it) {
+    const tile = document.createElement('button');
+    tile.type = 'button';
+    tile.className = 'wa-tile';
+    tile.dataset.key = it.key;
+    if (it.inLibrary) {
+      tile.classList.add('in-library');
+      tile.title = 'Já está na coleção';
+      tile.disabled = true;
+    } else if (waSelected.has(it.key)) {
+      tile.classList.add('is-selected');
+    }
+    const img = document.createElement('img');
+    img.loading = 'lazy';
+    img.decoding = 'async';
+    img.draggable = false;
+    img.alt = 'Figurinha';
+    img.src = api(`/api/stickers/whatsapp-favorites/${it.key}`);
+    tile.appendChild(img);
+    return tile;
   }
 
   async function openWaPanel() {
@@ -4665,30 +4700,39 @@
       const res = await fetch(api('/api/stickers/whatsapp-favorites'));
       const data = await res.json().catch(() => ({}));
       if (seq !== waLoadSeq) return;
-      if (!res.ok) throw new Error(data.message || 'Não consegui ler as favoritas do WhatsApp.');
+      if (!res.ok) throw new Error(data.message || 'Não consegui ler as figurinhas do WhatsApp.');
       const all = Array.isArray(data.items) ? data.items : [];
       waItems = all.filter((it) => !it.inLibrary);
       const inLib = all.length - waItems.length;
       const notes = [];
       if (waItems.length) {
-        notes.push(waItems.length === 1 ? '1 favorita pra escolher.' : `${waItems.length} favoritas pra escolher.`);
+        notes.push(waItems.length === 1 ? '1 figurinha pra escolher.' : `${waItems.length} figurinhas pra escolher.`);
       }
       if (inLib) notes.push(inLib === 1 ? '1 já está na coleção.' : `${inLib} já estão na coleção.`);
-      if (data.missing) {
-        notes.push(`${data.missing} ${data.missing === 1 ? 'ficou só no celular: o link dela no WhatsApp expirou e o Mac não consegue baixar' : 'ficaram só no celular: os links delas no WhatsApp expiraram e o Mac não consegue baixar'}. Pra trazer, mande pelo WhatsApp do celular as que você quiser pra qualquer conversa (um grupo só seu serve) e toque em Atualizar.`);
+      // Só conta as que são da pessoa (favoritas e mandadas); recebida
+      // antiga que expirou não faz falta avisar.
+      const groups = data.groups || {};
+      const lostFav = (groups.fav && groups.fav.missing) || 0;
+      const lostMine = (groups.mine && groups.mine.missing) || 0;
+      const lost = lostFav + lostMine;
+      if (lost) {
+        const parts = [];
+        if (lostFav) parts.push(lostFav === 1 ? '1 favorita' : `${lostFav} favoritas`);
+        if (lostMine) parts.push(lostMine === 1 ? '1 que você mandou' : `${lostMine} que você mandou`);
+        notes.push(`${parts.join(' e ')} só ${lost === 1 ? 'está' : 'estão'} no celular: o WhatsApp do Mac só consegue baixar figurinha que passou por alguma conversa nas últimas semanas, e as que você criou e não mandou pra ninguém ficam só no celular. Pra trazer, mande pelo WhatsApp do celular as que você quiser pra qualquer conversa (um grupo só seu serve) e toque em Atualizar.`);
       }
       waNote.textContent = notes.join(' ');
       waNote.classList.toggle('hidden', !notes.length);
       if (!waItems.length) {
         waEmptyText.textContent = all.length
-          ? 'Todas as favoritas que estão no Mac já estão na coleção.'
-          : 'Nenhuma favorita com arquivo neste Mac.';
+          ? 'Todas as figurinhas que estão no Mac já estão na coleção.'
+          : 'Nenhuma figurinha com arquivo neste Mac.';
         waEmpty.classList.remove('hidden');
       }
       renderWaGrid();
     } catch (e) {
       if (seq !== waLoadSeq) return;
-      waEmptyText.textContent = e.message || 'Não consegui ler as favoritas do WhatsApp.';
+      waEmptyText.textContent = e.message || 'Não consegui ler as figurinhas do WhatsApp.';
       waEmpty.classList.remove('hidden');
     } finally {
       if (seq === waLoadSeq) waLoading.classList.add('hidden');
@@ -4702,6 +4746,16 @@
   }
 
   waGrid.addEventListener('click', (e) => {
+    const groupBtn = e.target.closest('.wa-section-all');
+    if (groupBtn) {
+      if (waImportBusy) return;
+      const items = waItems.filter((it) => it.group === groupBtn.dataset.group);
+      const allOn = items.every((it) => waSelected.has(it.key));
+      items.forEach((it) => (allOn ? waSelected.delete(it.key) : waSelected.add(it.key)));
+      waGrid.querySelectorAll('.wa-tile').forEach((t) => t.classList.toggle('is-selected', waSelected.has(t.dataset.key)));
+      syncWaFooter();
+      return;
+    }
     const tile = e.target.closest('.wa-tile');
     if (!tile || tile.disabled || waImportBusy) return;
     const key = tile.dataset.key;
