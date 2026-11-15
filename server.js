@@ -1516,6 +1516,7 @@ roomRouter.get('/api/stickers/whatsapp-favorites', requireAuth, async (req, res)
     total: result.total,
     missing: result.missing,
     groups: result.groups,
+    recovering: waFavorites.recovering(), // sendo buscadas no celular agora (v50)
     items: result.items.map((it) => ({ key: it.key, group: it.group, inLibrary: have.has(it.key) })),
   });
 });
@@ -1535,6 +1536,7 @@ roomRouter.get('/api/stickers/whatsapp-favorites/:key', requireAuth, async (req,
   }
   const item = result.items.find((it) => it.key === req.params.key);
   if (!item) return res.status(404).end();
+  res.setHeader('Cache-Control', 'private, max-age=86400'); // o endereço é o hash do arquivo
   res.setHeader('Content-Type', 'image/webp');
   res.setHeader('Content-Security-Policy', MEDIA_CSP);
   res.send(item.buffer);

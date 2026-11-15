@@ -79,6 +79,12 @@ const WA_LOTTIE = Buffer.from('PK\x03\x04lottie');
 const WA_KEY_LOTTIE = crypto.randomBytes(32);
 const WA_ENC_LOTTIE = waEncrypt(WA_LOTTIE, WA_KEY_LOTTIE);
 const encShaOf = (enc) => crypto.createHash('sha256').update(enc).digest();
+// Favorita antiga (link expirado) que o celular manda de novo a pedido do
+// Bot de Figurinhas (v50), e uma mandada que o celular não tem mais.
+const WEBP_VELHA = webpWithExtraChunk(WEBP_BLUE, 'VELH');
+const WA_KEY_VELHA = crypto.randomBytes(32);
+const WA_ENC_VELHA = waEncrypt(WEBP_VELHA, WA_KEY_VELHA);
+const botCalls = [];
 
 function pbVarint(n) {
   const out = [];
@@ -135,29 +141,52 @@ insert into ZWACDSTICKER (ZFILEHASH, ZRELATIVEIMAGEPATH) values ('${b64sha(WEBP_
   });
   // Conversas: a vermelha já passou por uma (arquivo apagado, link morto).
   execFileSync('sqlite3', [path.join(dir, 'ChatStorage.sqlite')], {
-    input: `create table ZWAMESSAGE (Z_PK integer primary key, ZMESSAGETYPE integer, ZISFROMME integer, ZMESSAGEDATE timestamp);
+    input: `create table ZWAMESSAGE (Z_PK integer primary key, ZMESSAGETYPE integer, ZISFROMME integer, ZMESSAGEDATE timestamp, ZCHATSESSION integer, ZGROUPMEMBER integer, ZSTANZAID varchar);
+create table ZWACHATSESSION (Z_PK integer primary key, ZCONTACTJID varchar);
+create table ZWAGROUPMEMBER (Z_PK integer primary key, ZMEMBERJID varchar);
+insert into ZWACHATSESSION values (1, '120363000000000000@g.us');
+insert into ZWAGROUPMEMBER values (1, '5583900000000@s.whatsapp.net');
 create table ZWAMEDIAITEM (Z_PK integer primary key, ZMESSAGE integer, ZVCARDNAME varchar, ZMEDIALOCALPATH varchar, ZMEDIAURL varchar, ZMEDIAKEY blob, ZMEDIAURLDATE timestamp);
-insert into ZWAMESSAGE values (1, 15, 0, 100);
+insert into ZWAMESSAGE (Z_PK, ZMESSAGETYPE, ZISFROMME, ZMESSAGEDATE) values (1, 15, 0, 100);
 insert into ZWAMEDIAITEM values (1, 1, '${b64sha(WEBP_RED)}', 'Media/x/apagado.webp', '${mediaOrigin}/wa/morto', X'${crypto.randomBytes(32).toString('hex')}', 10);
-insert into ZWAMESSAGE values (2, 0, 0, 110);
-insert into ZWAMESSAGE values (4, 15, 1, 250);
+insert into ZWAMESSAGE (Z_PK, ZMESSAGETYPE, ZISFROMME, ZMESSAGEDATE) values (2, 0, 0, 110);
+insert into ZWAMESSAGE (Z_PK, ZMESSAGETYPE, ZISFROMME, ZMESSAGEDATE) values (4, 15, 1, 250);
 insert into ZWAMEDIAITEM values (4, 4, '${b64sha(WEBP_CRIADA)}', null, '${mediaOrigin}/wa/msg/criada', X'${mediaKeyBlob(WA_KEY_CRIADA, WA_ENC_CRIADA)}', 250);
-insert into ZWAMESSAGE values (5, 15, 0, 200);
+insert into ZWAMESSAGE (Z_PK, ZMESSAGETYPE, ZISFROMME, ZMESSAGEDATE) values (5, 15, 0, 200);
 insert into ZWAMEDIAITEM values (5, 5, '${b64sha(WA_RECEBIDA)}', null, '${mediaOrigin}/wa/msg/recebida', X'${mediaKeyBlob(WA_KEY_RECEBIDA, WA_ENC_RECEBIDA)}', 200);
-insert into ZWAMESSAGE values (6, 15, 1, 260);
+insert into ZWAMESSAGE (Z_PK, ZMESSAGETYPE, ZISFROMME, ZMESSAGEDATE) values (6, 15, 1, 260);
 insert into ZWAMEDIAITEM values (6, 6, '${b64sha(Buffer.from('antiga'))}', null, 'https://a.whatsapp.net', X'${mediaKeyBlob(crypto.randomBytes(32), Buffer.from('x'))}', 260);
-insert into ZWAMESSAGE values (7, 15, 0, 190);
+insert into ZWAMESSAGE (Z_PK, ZMESSAGETYPE, ZISFROMME, ZMESSAGEDATE) values (7, 15, 0, 190);
 insert into ZWAMEDIAITEM values (7, 7, '${b64sha(Buffer.from('expirada'))}', null, '${mediaOrigin}/wa/msg/expirada', X'${mediaKeyBlob(crypto.randomBytes(32), Buffer.from('x'))}', 190);
-insert into ZWAMESSAGE values (8, 15, 0, 180);
+insert into ZWAMESSAGE (Z_PK, ZMESSAGETYPE, ZISFROMME, ZMESSAGEDATE) values (8, 15, 0, 180);
 insert into ZWAMEDIAITEM values (8, 8, '${b64sha(WA_LOTTIE)}', null, '${mediaOrigin}/wa/msg/lottie', X'${mediaKeyBlob(WA_KEY_LOTTIE, WA_ENC_LOTTIE)}', 180);`,
   });
   return dir;
 }
 
+// Uma favorita antiga cujo link expirou e que só aparece numa mensagem velha
+// de grupo (link de mentira do WhatsApp), mais uma mandada que o celular
+// já apagou.
+function waAddOldStickers(dir, mediaOrigin) {
+  const action = Buffer.concat([pbField(1, `${mediaOrigin}/expirado/v/velha`), pbField(3, crypto.randomBytes(32)),
+    pbField(4, 'image/webp'), pbField(7, '/v/velha'), pbField(9, 1)]);
+  const value = Buffer.concat([pbField(1, 900), pbField(33, action)]);
+  const index = JSON.stringify(['favoriteSticker', b64sha(WEBP_VELHA)]);
+  execFileSync('sqlite3', [path.join(dir, 'AppState', 'ABC-123', 'AppState.sqlite')], {
+    input: `insert into ZAPPSTATECONFIRMEDMUTATIONENTITY (ZVERSION, ZACTIONNAME, ZINDEX, ZVALUE) values (8, 'favoriteSticker', '${index}', X'${value.toString('hex')}');`,
+  });
+  execFileSync('sqlite3', [path.join(dir, 'ChatStorage.sqlite')], {
+    input: `insert into ZWAMESSAGE values (9, 15, 0, 50, 1, 1, 'VELHA1');
+insert into ZWAMEDIAITEM values (9, 9, '${b64sha(WEBP_VELHA)}', null, 'https://a.whatsapp.net', X'${mediaKeyBlob(WA_KEY_VELHA, WA_ENC_VELHA)}', 50);
+insert into ZWAMESSAGE values (10, 15, 1, 40, 1, null, 'NAOTEM1');
+insert into ZWAMEDIAITEM values (10, 10, '${b64sha(Buffer.from('apagada'))}', null, '${mediaOrigin}/wa/msg/expirada', X'${mediaKeyBlob(crypto.randomBytes(32), Buffer.from('x'))}', 40);`,
+  });
+}
+
 // Simula o Juan mandando a figurinha "perdida" do celular pra uma conversa.
 function waReceiveFromPhone(dir, mediaOrigin) {
   execFileSync('sqlite3', [path.join(dir, 'ChatStorage.sqlite')], {
-    input: `insert into ZWAMESSAGE values (3, 15, 1, 300);
+    input: `insert into ZWAMESSAGE (Z_PK, ZMESSAGETYPE, ZISFROMME, ZMESSAGEDATE) values (3, 15, 1, 300);
 insert into ZWAMEDIAITEM values (2, 3, '${b64sha(WA_SUMIU)}', null, '${mediaOrigin}/wa/msg/sumiu', X'${mediaKeyBlob(WA_KEY_MSG, WA_ENC_MSG)}', 20);`,
   });
 }
@@ -203,6 +232,28 @@ function startFakeGiphy() {
         res.end(WA_ENC_BLUE);
       } else if (req.url === '/wa/msg/sumiu') {
         res.end(WA_ENC_MSG);
+      } else if (req.url === '/bot/reenviar' && req.method === 'POST') {
+        // Bot de Figurinhas falso: o celular "manda de novo" a VELHA1.
+        let body = '';
+        req.on('data', (d) => { body += d; });
+        req.on('end', () => {
+          const b = JSON.parse(body || '{}');
+          botCalls.push(b);
+          res.setHeader('Content-Type', 'application/json');
+          if (req.headers['x-token'] !== 'token-do-bot') {
+            res.statusCode = 401;
+            res.end('{}');
+          } else if (b.id === 'VELHA1' && b.remoteJid === '120363000000000000@g.us' && b.participant === '5583900000000@s.whatsapp.net'
+            && Buffer.from(b.mediaKey, 'base64').equals(WA_KEY_VELHA)) {
+            res.end(JSON.stringify({ ok: true, url: `${origin}/wa/msg/reenviada`, directPath: '/msg/reenviada' }));
+          } else {
+            res.statusCode = 502;
+            res.end(JSON.stringify({ error: 'Media re-upload failed by device (NOT_FOUND)', status: 404 }));
+          }
+        });
+        return;
+      } else if (req.url === '/wa/msg/reenviada') {
+        res.end(WA_ENC_VELHA);
       } else if (req.url === '/wa/msg/criada') {
         res.end(WA_ENC_CRIADA);
       } else if (req.url === '/wa/msg/recebida') {
@@ -272,6 +323,9 @@ async function main() {
     GIPHY_API_BASE: fakeOrigin,
     FXTWITTER_API_BASE: `${fakeOrigin}/fx`,
     WHATSAPP_MEDIA_BASE: `${fakeOrigin}/wa`,
+    WHATSAPP_REUPLOAD_URL: `${fakeOrigin}/bot/reenviar`,
+    WHATSAPP_REUPLOAD_TOKEN: 'token-do-bot',
+    WHATSAPP_REUPLOAD_GAP_MS: '0',
     ...(waDir ? { WHATSAPP_IMPORT: '1', WHATSAPP_CONTAINER: waDir } : {}),
   };
   const server = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')], { env, stdio: ['ignore', 'pipe', 'pipe'] });
@@ -594,6 +648,25 @@ async function main() {
         && favItems(r.json).length === 3 && r.json.items[2].key === sumiuKey && r.json.items[2].inLibrary === false, r.json);
       check('…e continua no grupo das favoritas, não repete nas mandadas', r.json.items.filter((it) => it.key === sumiuKey).length === 1
         && r.json.groups.mine.total === 2, r.json.groups);
+      waAddOldStickers(waDir, fakeOrigin);
+      const velhaKey = crypto.createHash('sha256').update(WEBP_VELHA).digest('hex');
+      for (let i = 0; i < 25; i++) {
+        r = await juan('GET', '/api/stickers/whatsapp-favorites');
+        if (r.json.items.some((it) => it.key === velhaKey) && !r.json.recovering) break;
+        await new Promise((ok) => setTimeout(ok, 150));
+      }
+      const velha = r.json.items.find((it) => it.key === velhaKey);
+      check('favorita de link expirado volta pelo celular (pedido ao Bot de Figurinhas)', velha && velha.group === 'fav'
+        && r.json.recovering === 0 && r.json.groups.fav.missing === 0, r.json);
+      check('…e o arquivo fica guardado em data/wa-cache', fs.existsSync(path.join(DATA_DIR, 'wa-cache', `${velhaKey}.webp`)));
+      r = await juan('GET', `/api/stickers/whatsapp-favorites/${velhaKey}`, undefined, { raw: true });
+      check('prévia da que voltou do celular chega igual', r.res.status === 200 && r.buf.equals(WEBP_VELHA));
+      const askedNao = botCalls.filter((b) => b.id === 'NAOTEM1').length;
+      r = await juan('GET', '/api/stickers/whatsapp-favorites');
+      await new Promise((ok) => setTimeout(ok, 300));
+      check('mandada que o celular não tem mais: pede uma vez só e conta como faltando', askedNao === 1
+        && botCalls.filter((b) => b.id === 'NAOTEM1').length === 1 && r.json.groups.mine.missing === 2, { askedNao, groups: r.json.groups });
+      check('recebidas antigas não são pedidas ao celular', !botCalls.some((b) => b.remoteJid !== '120363000000000000@g.us'), botCalls.map((b) => b.id));
       r = await anon('POST', '/api/stickers/import-whatsapp', { sender: 'x', keys: [] });
       check('importar exige sessão', r.res.status === 401);
       await juan('POST', '/api/clear');

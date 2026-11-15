@@ -4600,6 +4600,7 @@
   const waSelected = new Set();   // keys marcadas
   let waLoadSeq = 0;
   let waImportBusy = false;
+  let waPollTimer = null;         // enquanto o celular está mandando as que faltavam
 
   function isWaPanelOpen() {
     return !waPanel.classList.contains('hidden');
@@ -4686,15 +4687,21 @@
     loadWaFavorites();
   }
 
-  async function loadWaFavorites() {
+  // soft: atualização automática enquanto o celular manda as que faltavam -
+  // não apaga a grade nem o que já estava marcado.
+  async function loadWaFavorites(soft) {
     if (waImportBusy) return;
-    waItems = [];
-    waSelected.clear();
-    waGrid.replaceChildren();
-    waNote.classList.add('hidden');
-    waEmpty.classList.add('hidden');
-    waLoading.classList.remove('hidden');
-    syncWaFooter();
+    clearTimeout(waPollTimer);
+    const isSoft = soft === true;
+    if (!isSoft) {
+      waItems = [];
+      waSelected.clear();
+      waGrid.replaceChildren();
+      waNote.classList.add('hidden');
+      waEmpty.classList.add('hidden');
+      waLoading.classList.remove('hidden');
+      syncWaFooter();
+    }
     const seq = ++waLoadSeq;
     try {
       const res = await fetch(api('/api/stickers/whatsapp-favorites'));
@@ -4702,7 +4709,12 @@
       if (seq !== waLoadSeq) return;
       if (!res.ok) throw new Error(data.message || 'Não consegui ler as figurinhas do WhatsApp.');
       const all = Array.isArray(data.items) ? data.items : [];
+      const before = waItems.map((it) => it.key).join();
       waItems = all.filter((it) => !it.inLibrary);
+      const changed = !isSoft || before !== waItems.map((it) => it.key).join();
+      const stillThere = new Set(waItems.map((it) => it.key));
+      [...waSelected].forEach((k) => { if (!stillThere.has(k)) waSelected.delete(k); });
+      waEmpty.classList.add('hidden');
       const inLib = all.length - waItems.length;
       const notes = [];
       if (waItems.length) {
@@ -4714,12 +4726,17 @@
       const groups = data.groups || {};
       const lostFav = (groups.fav && groups.fav.missing) || 0;
       const lostMine = (groups.mine && groups.mine.missing) || 0;
-      const lost = lostFav + lostMine;
-      if (lost) {
+      const recovering = Number(data.recovering) || 0;
+      const lost = Math.max(0, lostFav + lostMine - recovering);
+      if (recovering) {
+        notes.push(`Buscando ${recovering === 1 ? '1 figurinha' : `${recovering} figurinhas`} no seu celular pelo Bot de Figurinhas (uns 2 segundos cada). Elas vão aparecendo aqui sozinhas — deixe o WhatsApp do celular com internet.`);
+        if (isWaPanelOpen()) waPollTimer = setTimeout(() => loadWaFavorites(true), 6000);
+      }
+      if (lost && !recovering) {
         const parts = [];
         if (lostFav) parts.push(lostFav === 1 ? '1 favorita' : `${lostFav} favoritas`);
         if (lostMine) parts.push(lostMine === 1 ? '1 que você mandou' : `${lostMine} que você mandou`);
-        notes.push(`${parts.join(' e ')} só ${lost === 1 ? 'está' : 'estão'} no celular: o WhatsApp do Mac só consegue baixar figurinha que passou por alguma conversa nas últimas semanas, e as que você criou e não mandou pra ninguém ficam só no celular. Pra trazer, mande pelo WhatsApp do celular as que você quiser pra qualquer conversa (um grupo só seu serve) e toque em Atualizar.`);
+        notes.push(`${parts.join(' e ')} não ${lost === 1 ? 'deu' : 'deram'} pra buscar: não ${lost === 1 ? 'aparece' : 'aparecem'} em nenhuma conversa deste Mac (ou o celular não tem mais o arquivo). Pra trazer, mande pelo WhatsApp do celular pra qualquer conversa (o “Você” serve) e toque em Atualizar.`);
       }
       waNote.textContent = notes.join(' ');
       waNote.classList.toggle('hidden', !notes.length);
@@ -4729,7 +4746,8 @@
           : 'Nenhuma figurinha com arquivo neste Mac.';
         waEmpty.classList.remove('hidden');
       }
-      renderWaGrid();
+      if (changed) renderWaGrid();
+      else syncWaFooter();
     } catch (e) {
       if (seq !== waLoadSeq) return;
       waEmptyText.textContent = e.message || 'Não consegui ler as figurinhas do WhatsApp.';
@@ -4741,6 +4759,7 @@
 
   function closeWaPanel() {
     if (waImportBusy) return; // não deixa a importação pela metade sem ninguém ver
+    clearTimeout(waPollTimer);
     waLoadSeq += 1;
     waPanel.classList.add('hidden');
   }
@@ -4829,7 +4848,7 @@
   });
 
   waBack.addEventListener('click', closeWaPanel);
-  waRefresh.addEventListener('click', loadWaFavorites);
+  waRefresh.addEventListener('click', () => loadWaFavorites());
   waImportBtn.addEventListener('click', () => {
     if (isTouchPrimary) closeTray();
     openWaPanel();
