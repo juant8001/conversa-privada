@@ -18,6 +18,7 @@ const { randomId } = require('./lib/crypto');
 const stickerTools = require('./lib/sticker-tools');
 const stickerLinks = require('./lib/sticker-links');
 const waFavorites = require('./lib/whatsapp-favorites');
+const waLinks = require('./lib/whatsapp-links');
 
 const PORT = parseInt(process.env.PORT || '4177', 10);
 // Default fica em 127.0.0.1 (só a própria máquina). Setar HOST=0.0.0.0 expõe
@@ -114,6 +115,7 @@ if (!ROOM_SLUG || ROOM_SLUG.length < 16) {
 
 fs.mkdirSync(DATA_DIR, { recursive: true });
 const store = new Store(DATA_DIR);
+waLinks.init({ dataDir: DATA_DIR });
 const bus = new EventEmitter();
 bus.setMaxListeners(50);
 
@@ -1472,16 +1474,19 @@ roomRouter.post('/api/stickers/from-link', requireAuth, (req, res) => {
   }, sender, extra);
 });
 
-// Figurinhas do WhatsApp deste Mac (só com WHATSAPP_IMPORT=1): as favoritas
-// e, desde a v49, todas as que passaram por conversas (as que a pessoa
-// mandou, inclusive as que criou, e as que recebeu). A pessoa vê tudo numa
-// tela, separado por grupo, escolhe quais quer e importa. Pode voltar quando
-// quiser: a tela só oferece as que ainda não estão na coleção (v48 - antes
-// era uma vez só; o data.waImportDone antigo agora é ignorado). As prévias
-// saem da mesma varredura que a importação usa (lib/whatsapp-favorites.js,
-// scan), então o que se vê é o que entra.
+// Figurinhas do WhatsApp (só com WHATSAPP_IMPORT=1). Desde a v51 CADA
+// PESSOA conecta o próprio WhatsApp e só vê as figurinhas dela; o que ela
+// importa entra na coleção dos dois (data.stickers é uma só). Quem tem o
+// mesmo número do WhatsApp deste Mac confirma com um código que o Bot de
+// Figurinhas manda pra conversa "Você" e usa os bancos do Mac (como até a
+// v50); qualquer outro número vira um aparelho conectado (código de
+// pareamento no celular). Ver lib/whatsapp-links.js.
+// A tela mostra favoritas, as que a pessoa mandou (inclusive as que criou) e
+// as recebidas, só as que ainda não estão na coleção; pode voltar quando
+// quiser. As prévias saem da mesma varredura que a importação usa, então o
+// que se vê é o que entra.
 function waImportOpen() {
-  return waFavorites.enabled();
+  return waLinks.enabled();
 }
 
 // Chaves (sha256 hex do arquivo do WhatsApp) que já estão na coleção: pela
@@ -1497,40 +1502,134 @@ function waKeysInLibrary(data) {
   return have;
 }
 
+function waWho(raw) {
+  return prefsKey(raw);
+}
+
+function waUserError(res, e, fallback) {
+  if (e && e.user) return res.status(400).json({ error: 'whatsapp', message: e.message });
+  console.error('whatsapp:', e && e.message);
+  return res.status(502).json({ error: 'whatsapp', message: fallback });
+}
+
+const NOT_LINKED = { error: 'not_linked', message: 'Conecte o seu WhatsApp primeiro.' };
+
+// Estado da conexão da pessoa (e sobe a conexão dela, se precisar).
+roomRouter.get('/api/whatsapp/status', requireAuth, async (req, res) => {
+  if (!waLinks.enabled()) return res.status(404).json({ error: 'disabled' });
+  const who = waWho(req.query && req.query.name);
+  if (!who) return res.status(400).json({ error: 'invalid' });
+  try {
+    loadStoreOnly(req); // confere a chave antes de mexer no que é cifrado com ela
+    res.json(await waLinks.status(req.session.key, who));
+  } catch (e) {
+    if (e && e.code === 'ERR_CRYPTO_INVALID_AUTH_TAG') return res.status(401).json({ error: 'unauthenticated' });
+    waUserError(res, e, 'Não consegui ver a conexão do WhatsApp agora.');
+  }
+});
+
+// Conectar: { sender, number }. Devolve { method: 'code' } (o código foi pra
+// conversa "Você") ou { method: 'pairing', code } (digitar no celular).
+let waLinkBusy = false;
+roomRouter.post('/api/whatsapp/link', requireAuth, async (req, res) => {
+  if (!waLinks.enabled()) return res.status(404).json({ error: 'disabled' });
+  const body = req.body || {};
+  const sender = cleanSender(body.sender);
+  const who = waWho(sender);
+  if (!who || typeof body.number !== 'string') return res.status(400).json({ error: 'invalid' });
+  if (waLinkBusy) return res.status(429).json({ error: 'busy', message: 'Já tem uma conexão começando. Tente de novo em alguns segundos.' });
+  waLinkBusy = true;
+  try {
+    loadStoreOnly(req);
+    res.json({ ok: true, ...(await waLinks.startLink(req.session.key, who, sender, body.number)) });
+  } catch (e) {
+    waUserError(res, e, 'Não consegui começar a conexão agora.');
+  } finally {
+    waLinkBusy = false;
+  }
+});
+
+roomRouter.post('/api/whatsapp/verify', requireAuth, (req, res) => {
+  if (!waLinks.enabled()) return res.status(404).json({ error: 'disabled' });
+  const body = req.body || {};
+  const who = waWho(body.sender);
+  if (!who || typeof body.code !== 'string') return res.status(400).json({ error: 'invalid' });
+  try {
+    loadStoreOnly(req);
+    waLinks.verifyCode(req.session.key, who, body.code);
+    res.json({ ok: true });
+  } catch (e) {
+    waUserError(res, e, 'Não consegui confirmar agora.');
+  }
+});
+
+roomRouter.post('/api/whatsapp/cancel', requireAuth, (req, res) => {
+  const who = waWho(req.body && req.body.sender);
+  if (who) waLinks.cancel(who);
+  res.json({ ok: true });
+});
+
+// Desconectar só tira a conexão DESSA pessoa; as figurinhas que ela já
+// importou continuam na coleção dos dois.
+roomRouter.post('/api/whatsapp/unlink', requireAuth, async (req, res) => {
+  if (!waLinks.enabled()) return res.status(404).json({ error: 'disabled' });
+  const who = waWho(req.body && req.body.sender);
+  if (!who) return res.status(400).json({ error: 'invalid' });
+  try {
+    loadStoreOnly(req);
+    res.json(await waLinks.unlink(req.session.key, who));
+  } catch (e) {
+    waUserError(res, e, 'Não consegui desconectar agora.');
+  }
+});
+
+async function waSource(req, rawName) {
+  const who = waWho(rawName);
+  if (!who) return null;
+  return waLinks.sourceFor(req.session.key, who);
+}
+
 roomRouter.get('/api/stickers/whatsapp-favorites', requireAuth, async (req, res) => {
-  if (!waFavorites.enabled()) return res.status(404).json({ error: 'disabled' });
+  if (!waLinks.enabled()) return res.status(404).json({ error: 'disabled' });
   let data;
   try {
     data = loadWithSessionKey(req);
   } catch (e) {
     return res.status(401).json({ error: 'unauthenticated' });
   }
+  let src;
   let result;
   try {
-    result = await waFavorites.scan({ fresh: true });
+    src = await waSource(req, req.query && req.query.name);
+    if (!src) return res.status(409).json(NOT_LINKED);
+    result = await src.scan({ fresh: true });
   } catch (e) {
-    return res.status(502).json({ error: 'whatsapp', message: e.message || 'Não consegui ler o WhatsApp deste Mac.' });
+    return res.status(502).json({ error: 'whatsapp', message: (e && e.user && e.message) || 'Não consegui ler as figurinhas do seu WhatsApp.' });
   }
   const have = waKeysInLibrary(data);
   res.json({
+    source: src.kind,
+    syncing: !!src.syncing, // ainda chegando do celular (conexão nova)
     total: result.total,
     missing: result.missing,
     groups: result.groups,
-    recovering: waFavorites.recovering(), // sendo buscadas no celular agora (v50)
+    recovering: src.recovering(), // sendo buscadas no celular agora
     items: result.items.map((it) => ({ key: it.key, group: it.group, inLibrary: have.has(it.key) })),
   });
 });
 
 roomRouter.get('/api/stickers/whatsapp-favorites/:key', requireAuth, async (req, res) => {
-  if (!waFavorites.enabled() || !/^[0-9a-f]{64}$/.test(req.params.key)) return res.status(404).end();
+  if (!waLinks.enabled() || !/^[0-9a-f]{64}$/.test(req.params.key)) return res.status(404).end();
   try {
-    loadWithSessionKey(req);
+    loadStoreOnly(req);
   } catch (e) {
     return res.status(401).end();
   }
   let result;
   try {
-    result = await waFavorites.scan();
+    const src = await waSource(req, req.query && req.query.name);
+    if (!src) return res.status(404).end();
+    result = await src.scan();
   } catch (e) {
     return res.status(502).end();
   }
@@ -1542,12 +1641,13 @@ roomRouter.get('/api/stickers/whatsapp-favorites/:key', requireAuth, async (req,
   res.send(item.buffer);
 });
 
-// Importa as escolhidas. O celular manda de até 25 em 25. As que já estão na
-// coleção contam como repetidas e não são lidas de novo.
+// Importa as escolhidas DO WHATSAPP DE QUEM PEDIU pra coleção dos dois. O
+// celular manda de até 25 em 25. As que já estão na coleção (de qualquer um
+// dos dois) contam como repetidas e não são lidas de novo.
 const WA_BATCH = 25;
 let waImportBusy = false;
 roomRouter.post('/api/stickers/import-whatsapp', requireAuth, async (req, res) => {
-  if (!waFavorites.enabled()) return res.status(404).json({ error: 'disabled' });
+  if (!waLinks.enabled()) return res.status(404).json({ error: 'disabled' });
   const body = req.body || {};
   const sender = cleanSender(body.sender);
   const keys = Array.isArray(body.keys) ? body.keys.filter((k) => typeof k === 'string' && /^[0-9a-f]{64}$/.test(k)) : null;
@@ -1563,9 +1663,11 @@ roomRouter.post('/api/stickers/import-whatsapp', requireAuth, async (req, res) =
     }
     let result;
     try {
-      result = await waFavorites.scan();
+      const src = await waSource(req, sender);
+      if (!src) return res.status(409).json(NOT_LINKED);
+      result = await src.scan();
     } catch (e) {
-      return res.status(502).json({ error: 'whatsapp', message: e.message || 'Não consegui ler o WhatsApp deste Mac.' });
+      return res.status(502).json({ error: 'whatsapp', message: 'Não consegui ler as figurinhas do seu WhatsApp.' });
     }
     const order = new Map(result.items.map((it, i) => [it.key, i]));
     const ready = [];

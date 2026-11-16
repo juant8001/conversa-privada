@@ -4673,7 +4673,7 @@
     img.decoding = 'async';
     img.draggable = false;
     img.alt = 'Figurinha';
-    img.src = api(`/api/stickers/whatsapp-favorites/${it.key}`);
+    img.src = api(`/api/stickers/whatsapp-favorites/${it.key}?${waNameQuery()}`);
     tile.appendChild(img);
     return tile;
   }
@@ -4684,8 +4684,246 @@
       return;
     }
     waPanel.classList.remove('hidden');
-    loadWaFavorites();
+    waCheckStatus();
   }
+
+  // ---- Conectar o WhatsApp de quem está usando (v51) ----
+  // Cada pessoa conecta o dela e só vê as figurinhas dela; a coleção é dos
+  // dois. Se o número é o do WhatsApp deste Mac, o Bot de Figurinhas manda
+  // um código pra conversa "Você"; senão o chat vira um aparelho conectado
+  // (código de 8 letras digitado no celular).
+  const waConnect = document.getElementById('wa-connect');
+  const waConnectMsg = document.getElementById('wa-connect-msg');
+  const waNumberForm = document.getElementById('wa-number-form');
+  const waNumber = document.getElementById('wa-number');
+  const waNumberBtn = document.getElementById('wa-number-btn');
+  const waCodeForm = document.getElementById('wa-code-form');
+  const waCode = document.getElementById('wa-code');
+  const waCodeBtn = document.getElementById('wa-code-btn');
+  const waPairing = document.getElementById('wa-pairing');
+  const waPairCode = document.getElementById('wa-pair-code');
+  const waPairStatus = document.getElementById('wa-pair-status');
+  const waPairRetry = document.getElementById('wa-pair-retry');
+  const waAccount = document.getElementById('wa-account');
+  const waAccountText = document.getElementById('wa-account-text');
+  const waUnlink = document.getElementById('wa-unlink');
+  const waLoadingText = document.getElementById('wa-loading-text');
+  const waFooter = waPanel.querySelector('.wa-footer');
+  let waStatusTimer = null;
+  let waLastNumber = '';
+
+  function waNameQuery() {
+    return `name=${encodeURIComponent(myName())}`;
+  }
+
+  // 'loading' | 'connect' | 'list'
+  function showWaView(view, loadingText) {
+    const list = view === 'list';
+    waConnect.classList.toggle('hidden', view !== 'connect');
+    waAccount.classList.toggle('hidden', !list);
+    waFooter.classList.toggle('hidden', !list);
+    waRefresh.classList.toggle('hidden', !list);
+    if (!list) {
+      clearTimeout(waPollTimer);
+      waItems = [];
+      waSelected.clear();
+      waGrid.replaceChildren();
+      waNote.classList.add('hidden');
+      waEmpty.classList.add('hidden');
+      waSelectAll.classList.add('hidden');
+    }
+    waLoadingText.textContent = loadingText || 'lendo as figurinhas do seu WhatsApp';
+    waLoading.classList.toggle('hidden', view !== 'loading');
+  }
+
+  // 'number' | 'code' | 'pairing'
+  function showConnectStep(step, msg) {
+    showWaView('connect');
+    waNumberForm.classList.toggle('hidden', step !== 'number');
+    waCodeForm.classList.toggle('hidden', step !== 'code');
+    waPairing.classList.toggle('hidden', step !== 'pairing');
+    waConnectMsg.textContent = msg || '';
+    waConnectMsg.classList.toggle('hidden', !msg);
+  }
+
+  function showPairing(code, expired) {
+    clearTimeout(waStatusTimer);
+    showConnectStep('pairing');
+    waPairCode.textContent = code || '';
+    waPairCode.classList.toggle('is-expired', !!expired);
+    waPairRetry.classList.toggle('hidden', !expired);
+    waPairStatus.textContent = expired ? 'Esse código venceu. Gere outro.' : 'Esperando você digitar o código no celular…';
+    if (!expired) waStatusTimer = setTimeout(() => waCheckStatus(true), 3000);
+  }
+
+  async function waCheckStatus(fromPoll) {
+    clearTimeout(waStatusTimer);
+    const seq = ++waLoadSeq;
+    if (fromPoll !== true) showWaView('loading', 'vendo a conexão do seu WhatsApp');
+    let st;
+    try {
+      const res = await fetch(api(`/api/whatsapp/status?${waNameQuery()}`));
+      st = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(st.message || 'Não consegui ver a conexão do WhatsApp.');
+    } catch (e) {
+      if (seq !== waLoadSeq || !isWaPanelOpen()) return;
+      if (fromPoll === true) {
+        waStatusTimer = setTimeout(() => waCheckStatus(true), 4000);
+        return;
+      }
+      showWaView('connect');
+      showConnectStep('number', e.message || 'Não consegui ver a conexão do WhatsApp.');
+      return;
+    }
+    if (seq !== waLoadSeq || !isWaPanelOpen()) return;
+    if (st.linked) {
+      waAccountText.textContent = st.kind === 'mac'
+        ? `Seu WhatsApp: ${st.number} (o deste Mac)`
+        : `Seu WhatsApp: ${st.number}`;
+      if (st.state === 'connecting') {
+        showWaView('loading', 'conectando no seu WhatsApp');
+        waStatusTimer = setTimeout(() => waCheckStatus(true), 2000);
+        return;
+      }
+      showWaView('list');
+      loadWaFavorites();
+      return;
+    }
+    if (st.pairing) {
+      if (st.pairing.done) {
+        showConnectStep('pairing');
+        waPairCode.classList.add('is-expired');
+        waPairRetry.classList.add('hidden');
+        waPairStatus.textContent = 'Conectado! Guardando a conexão…';
+        waStatusTimer = setTimeout(() => waCheckStatus(true), 1500);
+        return;
+      }
+      showPairing(st.pairing.code, st.pairing.expired);
+      return;
+    }
+    if (st.awaitingCode) {
+      showConnectStep('code');
+      return;
+    }
+    showConnectStep('number', st.loggedOut ? 'O WhatsApp desconectou este chat. Conecte de novo pra continuar.' : '');
+  }
+
+  waNumberForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const number = waNumber.value.trim();
+    if (number.replace(/\D/g, '').length < 10) {
+      showConnectStep('number', 'Digite o número com DDD.');
+      waNumber.focus();
+      return;
+    }
+    waLastNumber = number;
+    clearTimeout(waStatusTimer);
+    waNumberBtn.disabled = true;
+    waPairRetry.disabled = true;
+    waNumberBtn.textContent = 'Conectando…';
+    try {
+      const res = await fetch(api('/api/whatsapp/link'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sender: myName(), number }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.message || 'Não consegui começar a conexão.');
+      if (!isWaPanelOpen()) return;
+      if (data.method === 'code') {
+        showConnectStep('code');
+        waCode.value = '';
+        waCode.focus();
+      } else {
+        showPairing(data.code, false);
+      }
+    } catch (err) {
+      showConnectStep('number', err.message);
+    } finally {
+      waNumberBtn.disabled = false;
+      waPairRetry.disabled = false;
+      waNumberBtn.textContent = 'Conectar';
+    }
+  });
+
+  waCodeForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const code = waCode.value.replace(/\D/g, '');
+    if (code.length !== 6) {
+      showConnectStep('code', 'O código tem 6 números.');
+      waCode.focus();
+      return;
+    }
+    waCodeBtn.disabled = true;
+    try {
+      const res = await fetch(api('/api/whatsapp/verify'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sender: myName(), code }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.message || 'Não consegui confirmar.');
+      toast('WhatsApp conectado.');
+      waCheckStatus();
+    } catch (err) {
+      showConnectStep(/expirou|outro/i.test(err.message) ? 'number' : 'code', err.message);
+    } finally {
+      waCodeBtn.disabled = false;
+    }
+  });
+
+  waConnect.querySelectorAll('.wa-other-number').forEach((btn) => btn.addEventListener('click', () => {
+    clearTimeout(waStatusTimer);
+    fetch(api('/api/whatsapp/cancel'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sender: myName() }),
+    }).catch(() => {});
+    showConnectStep('number');
+    waNumber.focus();
+  }));
+
+  waPairRetry.addEventListener('click', () => {
+    if (!waNumber.value.trim()) waNumber.value = waLastNumber;
+    if (typeof waNumberForm.requestSubmit === 'function') waNumberForm.requestSubmit();
+    else waNumberForm.dispatchEvent(new Event('submit', { cancelable: true }));
+  });
+
+  waPairCode.addEventListener('click', async () => {
+    const code = waPairCode.textContent.replace(/[^A-Za-z0-9]/g, '');
+    if (!code || waPairCode.classList.contains('is-expired')) return;
+    try {
+      await navigator.clipboard.writeText(code);
+      toast('Código copiado.');
+    } catch (e) { /* sem área de transferência: digita na mão */ }
+  });
+
+  waUnlink.addEventListener('click', async () => {
+    if (waImportBusy) return;
+    const ok = await askConfirm(
+      'Desconectar o seu WhatsApp deste chat? As figurinhas que você já importou continuam na coleção.',
+      'Desconectar',
+    );
+    if (!ok) return;
+    waUnlink.disabled = true;
+    try {
+      const res = await fetch(api('/api/whatsapp/unlink'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sender: myName() }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.message || 'Não consegui desconectar agora.');
+      toast(data.removedFromPhone
+        ? 'WhatsApp desconectado.'
+        : 'Desconectado daqui. Se ainda aparecer em Dispositivos conectados no celular, toque nele e saia.', 6000);
+      waCheckStatus();
+    } catch (err) {
+      toast(err.message);
+    } finally {
+      waUnlink.disabled = false;
+    }
+  });
 
   // soft: atualização automática enquanto o celular manda as que faltavam -
   // não apaga a grade nem o que já estava marcado.
@@ -4704,10 +4942,16 @@
     }
     const seq = ++waLoadSeq;
     try {
-      const res = await fetch(api('/api/stickers/whatsapp-favorites'));
+      const res = await fetch(api(`/api/stickers/whatsapp-favorites?${waNameQuery()}`));
       const data = await res.json().catch(() => ({}));
       if (seq !== waLoadSeq) return;
-      if (!res.ok) throw new Error(data.message || 'Não consegui ler as figurinhas do WhatsApp.');
+      if (res.status === 409) {
+        // Ainda não conectou (ou o WhatsApp desconectou): volta pra conexão.
+        waLoading.classList.add('hidden');
+        waCheckStatus();
+        return;
+      }
+      if (!res.ok) throw new Error(data.message || 'Não consegui ler as figurinhas do seu WhatsApp.');
       const all = Array.isArray(data.items) ? data.items : [];
       const before = waItems.map((it) => it.key).join();
       waItems = all.filter((it) => !it.inLibrary);
@@ -4728,29 +4972,32 @@
       const lostMine = (groups.mine && groups.mine.missing) || 0;
       const recovering = Number(data.recovering) || 0;
       const lost = Math.max(0, lostFav + lostMine - recovering);
-      if (recovering) {
-        notes.push(`Buscando ${recovering === 1 ? '1 figurinha' : `${recovering} figurinhas`} no seu celular pelo Bot de Figurinhas (uns 2 segundos cada). Elas vão aparecendo aqui sozinhas — deixe o WhatsApp do celular com internet.`);
-        if (isWaPanelOpen()) waPollTimer = setTimeout(() => loadWaFavorites(true), 6000);
+      if (data.syncing) {
+        notes.push('Ainda chegando do seu celular (a primeira vez demora um pouco) — a lista vai crescendo sozinha.');
       }
-      if (lost && !recovering) {
+      if (recovering) {
+        notes.push(`Buscando ${recovering === 1 ? '1 figurinha' : `${recovering} figurinhas`} no seu celular${data.source === 'mac' ? ' pelo Bot de Figurinhas' : ''} (uns 2 segundos cada). Elas vão aparecendo aqui sozinhas — deixe o WhatsApp do celular com internet.`);
+      }
+      if ((recovering || data.syncing) && isWaPanelOpen()) waPollTimer = setTimeout(() => loadWaFavorites(true), 6000);
+      if (lost && !recovering && !data.syncing) {
         const parts = [];
         if (lostFav) parts.push(lostFav === 1 ? '1 favorita' : `${lostFav} favoritas`);
         if (lostMine) parts.push(lostMine === 1 ? '1 que você mandou' : `${lostMine} que você mandou`);
-        notes.push(`${parts.join(' e ')} não ${lost === 1 ? 'deu' : 'deram'} pra buscar: não ${lost === 1 ? 'aparece' : 'aparecem'} em nenhuma conversa deste Mac (ou o celular não tem mais o arquivo). Pra trazer, mande pelo WhatsApp do celular pra qualquer conversa (o “Você” serve) e toque em Atualizar.`);
+        notes.push(`${parts.join(' e ')} não ${lost === 1 ? 'deu' : 'deram'} pra buscar: não ${lost === 1 ? 'aparece' : 'aparecem'} em nenhuma conversa que chegou aqui (ou o celular não tem mais o arquivo). Pra trazer, mande pelo WhatsApp do celular pra qualquer conversa (o “Você” serve) e toque em Atualizar.`);
       }
       waNote.textContent = notes.join(' ');
       waNote.classList.toggle('hidden', !notes.length);
       if (!waItems.length) {
         waEmptyText.textContent = all.length
-          ? 'Todas as figurinhas que estão no Mac já estão na coleção.'
-          : 'Nenhuma figurinha com arquivo neste Mac.';
+          ? 'Todas as suas figurinhas do WhatsApp já estão na coleção.'
+          : (data.syncing ? 'Esperando as figurinhas chegarem do seu celular…' : 'Nenhuma figurinha do seu WhatsApp por aqui ainda.');
         waEmpty.classList.remove('hidden');
       }
       if (changed) renderWaGrid();
       else syncWaFooter();
     } catch (e) {
       if (seq !== waLoadSeq) return;
-      waEmptyText.textContent = e.message || 'Não consegui ler as figurinhas do WhatsApp.';
+      waEmptyText.textContent = e.message || 'Não consegui ler as figurinhas do seu WhatsApp.';
       waEmpty.classList.remove('hidden');
     } finally {
       if (seq === waLoadSeq) waLoading.classList.add('hidden');
@@ -4760,6 +5007,7 @@
   function closeWaPanel() {
     if (waImportBusy) return; // não deixa a importação pela metade sem ninguém ver
     clearTimeout(waPollTimer);
+    clearTimeout(waStatusTimer);
     waLoadSeq += 1;
     waPanel.classList.add('hidden');
   }
@@ -4840,7 +5088,7 @@
     }
     refreshLibrary();
     closeWaPanel();
-    let msg = added === 1 ? '1 figurinha importada do WhatsApp.' : `${added} figurinhas importadas do WhatsApp.`;
+    let msg = added === 1 ? '1 figurinha importada — já está na coleção dos dois.' : `${added} figurinhas importadas — já estão na coleção dos dois.`;
     if (missing) msg += ` ${missing} não ${missing === 1 ? 'pôde' : 'puderam'} ser lida${missing === 1 ? '' : 's'}.`;
     if (full) msg += ' A coleção encheu antes de terminar.';
     if (error) msg += ` ${error}`;

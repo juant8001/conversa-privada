@@ -2440,6 +2440,96 @@ body::before {
 }
 .wa-import:disabled { opacity: 0.45; cursor: default; }
 
+/* ---- conectar o WhatsApp de cada pessoa (v51) ---- */
+.wa-account {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  max-width: 900px;
+  margin: 10px auto 0;
+  padding: 8px 14px;
+  box-sizing: border-box;
+  color: var(--muted);
+  font-size: 13px;
+}
+.wa-link-btn {
+  border: none;
+  background: transparent;
+  color: var(--accent);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  padding: 6px 4px;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+  touch-action: manipulation;
+}
+.wa-link-btn:disabled { opacity: 0.5; cursor: default; }
+.wa-connect {
+  max-width: 420px;
+  margin: 24px auto;
+  padding: 0 18px;
+  box-sizing: border-box;
+  color: var(--ink);
+  font-size: 14px;
+  line-height: 1.5;
+}
+.wa-connect-lead { margin: 0 0 16px; color: var(--muted); text-align: center; }
+.wa-connect-msg {
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border-radius: 12px;
+  background: rgba(224, 104, 90, 0.12);
+  color: var(--ink);
+  font-size: 13px;
+}
+.wa-connect-form { display: flex; flex-direction: column; gap: 10px; align-items: stretch; }
+.wa-connect-form p { margin: 0; }
+.wa-connect-form label { color: var(--muted); font-size: 13px; }
+.wa-connect-form .wa-import { max-width: none; }
+.wa-connect-form .wa-link-btn { align-self: center; }
+.wa-input {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid var(--border);
+  background: var(--card-2);
+  color: var(--ink);
+  border-radius: 14px;
+  padding: 13px 16px;
+  font-size: 16px; /* menos que 16px o iOS dá zoom na página */
+  text-align: center;
+  outline: none;
+  -webkit-appearance: none;
+  appearance: none;
+}
+.wa-input::placeholder { color: var(--muted); }
+.wa-input:focus { border-color: var(--accent); box-shadow: var(--ring); }
+.wa-code-input { letter-spacing: 0.3em; font-variant-numeric: tabular-nums; }
+.wa-pair-code {
+  display: block;
+  width: 100%;
+  margin: 4px 0;
+  padding: 16px 10px;
+  border: 1px dashed var(--accent);
+  border-radius: 16px;
+  background: rgba(226, 137, 106, 0.08);
+  color: var(--ink);
+  font: inherit;
+  font-size: 30px;
+  font-weight: 700;
+  letter-spacing: 0.12em;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  -webkit-appearance: none;
+  appearance: none;
+  touch-action: manipulation;
+}
+.wa-pair-code.is-expired { opacity: 0.35; text-decoration: line-through; border-color: var(--border); }
+.wa-hint { color: var(--muted); font-size: 12.5px; }
+.wa-pair-status { color: var(--ink); font-size: 13px; text-align: center; }
+
 /* ---- painel de favoritas ---- */
 .fav-list {
   max-width: 720px;

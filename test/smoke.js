@@ -85,6 +85,29 @@ const WEBP_VELHA = webpWithExtraChunk(WEBP_BLUE, 'VELH');
 const WA_KEY_VELHA = crypto.randomBytes(32);
 const WA_ENC_VELHA = waEncrypt(WEBP_VELHA, WA_KEY_VELHA);
 const botCalls = [];
+// WhatsApp do Teo (v51): conectado como aparelho, pelo Baileys de mentira.
+const TEO_FAV = webpWithExtraChunk(WEBP_RED, 'TEO1');
+const TEO_KEY_FAV = crypto.randomBytes(32);
+const TEO_ENC_FAV = waEncrypt(TEO_FAV, TEO_KEY_FAV);
+const TEO_MINE = webpWithExtraChunk(WEBP_BLUE, 'TEO2'); // link expirado: volta pelo celular
+const TEO_KEY_MINE = crypto.randomBytes(32);
+const TEO_ENC_MINE = waEncrypt(TEO_MINE, TEO_KEY_MINE);
+const TEO_RECV = webpWithExtraChunk(WEBP_RED, 'TEO3');
+const TEO_KEY_RECV = crypto.randomBytes(32);
+const TEO_ENC_RECV = waEncrypt(TEO_RECV, TEO_KEY_RECV);
+const botCodes = [];
+function writeTeoPhone(file) {
+  const k = (x) => x.toString('base64');
+  fs.writeFileSync(file, JSON.stringify({
+    favorites: [{ hash: b64sha(TEO_FAV), mediaKey: k(TEO_KEY_FAV), directPath: '/teo/fav', encSha: k(encShaOf(TEO_ENC_FAV)), ts: 5000 }],
+    messages: [
+      { hash: b64sha(TEO_MINE), mediaKey: k(TEO_KEY_MINE), directPath: '/msg/expirada', fromMe: true, ts: 1700000000, id: 'TEOMSG1', remoteJid: '5511977776666@s.whatsapp.net' },
+      { hash: b64sha(TEO_RECV), mediaKey: k(TEO_KEY_RECV), directPath: '/teo/recv', fromMe: false, ts: 1700000100, id: 'TEOMSG2', remoteJid: '5511977776666@s.whatsapp.net' },
+      { hash: b64sha(TEO_FAV), mediaKey: k(TEO_KEY_FAV), directPath: '/teo/fav', fromMe: true, ts: 1700000200, id: 'TEOMSG3', remoteJid: '5511977776666@s.whatsapp.net' },
+    ],
+    reupload: { TEOMSG1: '/teo/reenviada' },
+  }));
+}
 
 function pbVarint(n) {
   const out = [];
@@ -252,6 +275,25 @@ function startFakeGiphy() {
           }
         });
         return;
+      } else if (req.url === '/bot/eu' && req.headers['x-token'] === 'token-do-bot') {
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify({ ok: true, numero: '558390001111' }));
+      } else if (req.url === '/bot/mandar-codigo' && req.method === 'POST') {
+        let body = '';
+        req.on('data', (d) => { body += d; });
+        req.on('end', () => {
+          res.setHeader('Content-Type', 'application/json');
+          if (req.headers['x-token'] !== 'token-do-bot') { res.statusCode = 401; res.end('{}'); return; }
+          botCodes.push(JSON.parse(body || '{}').codigo);
+          res.end(JSON.stringify({ ok: true }));
+        });
+        return;
+      } else if (req.url === '/wa/teo/fav') {
+        res.end(TEO_ENC_FAV);
+      } else if (req.url === '/wa/teo/recv') {
+        res.end(TEO_ENC_RECV);
+      } else if (req.url === '/wa/teo/reenviada') {
+        res.end(TEO_ENC_MINE);
       } else if (req.url === '/wa/msg/reenviada') {
         res.end(WA_ENC_VELHA);
       } else if (req.url === '/wa/msg/criada') {
@@ -308,6 +350,8 @@ async function main() {
   const fakeOrigin = `http://127.0.0.1:${giphy.address().port}`;
   const canWa = hasBin('sqlite3');
   const waDir = canWa ? makeFakeWhatsApp(fakeOrigin) : null;
+  const teoPhone = path.join(DATA_DIR, '..', `pc-teo-${PORT}.json`);
+  writeTeoPhone(teoPhone);
   const env = {
     ...process.env,
     PORT: String(PORT),
@@ -327,6 +371,8 @@ async function main() {
     WHATSAPP_REUPLOAD_TOKEN: 'token-do-bot',
     WHATSAPP_REUPLOAD_GAP_MS: '0',
     ...(waDir ? { WHATSAPP_IMPORT: '1', WHATSAPP_CONTAINER: waDir } : {}),
+    WHATSAPP_BAILEYS_MODULE: path.join(__dirname, 'fake-baileys.mjs'),
+    WHATSAPP_FAKE_DATA: teoPhone,
   };
   const server = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')], { env, stdio: ['ignore', 'pipe', 'pipe'] });
   let serverErr = '';
@@ -603,29 +649,47 @@ async function main() {
       const criadaKey = crypto.createHash('sha256').update(WEBP_CRIADA).digest('hex');
       const recebidaKey = crypto.createHash('sha256').update(WA_RECEBIDA).digest('hex');
       const favItems = (j) => j.items.filter((it) => it.group === 'fav');
-      r = await juan('GET', '/api/stickers/whatsapp-favorites');
+      r = await juan('GET', '/api/stickers/whatsapp-favorites?name=Juan');
+      check('sem conectar o WhatsApp a lista não abre (409)', r.res.status === 409 && r.json.error === 'not_linked', r.json);
+      r = await juan('GET', '/api/whatsapp/status?name=Juan');
+      check('status: ainda não conectado', r.res.status === 200 && r.json.linked === false, r.json);
+      r = await juan('POST', '/api/whatsapp/link', { sender: 'Juan', number: '(83) 9 9000-1111' });
+      check('número do Mac (com o 9 a mais) -> código pela conversa "Você"', r.res.status === 200 && r.json.method === 'code'
+        && botCodes.length === 1 && /^\d{6}$/.test(botCodes[0]), r.json);
+      r = await juan('POST', '/api/whatsapp/verify', { sender: 'Juan', code: botCodes[0] === '000000' ? '111111' : '000000' });
+      check('código errado = 400', r.res.status === 400 && /errado/i.test(r.json.message), r.json);
+      r = await teo('POST', '/api/whatsapp/verify', { sender: 'Teo', code: botCodes[0] });
+      check('o código do Juan não conecta o Teo', r.res.status === 400, r.json);
+      r = await juan('POST', '/api/whatsapp/verify', { sender: 'JUAN', code: botCodes[0] });
+      check('código certo conecta o WhatsApp do Mac pro Juan', r.res.status === 200 && r.json.ok, r.json);
+      r = await juan('GET', '/api/whatsapp/status?name=juan');
+      check('status: conectado, fonte do Mac, número mascarado', r.json.linked === true && r.json.kind === 'mac'
+        && r.json.number === '+55 83 •••••-1111', r.json);
+      check('o índice das conexões fica cifrado no disco', fs.existsSync(path.join(DATA_DIR, 'wa-links', 'index.enc'))
+        && !fs.readFileSync(path.join(DATA_DIR, 'wa-links', 'index.enc')).toString('latin1').includes('558390001111'));
+      r = await juan('GET', '/api/stickers/whatsapp-favorites?name=Juan');
       check('favoritas: 2 com arquivo (local e baixada), 1 perdida', r.res.status === 200 && r.json.groups.fav.total === 3
         && r.json.groups.fav.missing === 1 && favItems(r.json).length === 2 && r.json.items[0].key === redKey && r.json.items[1].key === blueKey, r.json);
       check('as que ele mandou (criadas) vêm das conversas, com a chave no formato do ChatStorage', r.json.groups.mine.total === 2
         && r.json.groups.mine.missing === 1 && r.json.items[2].key === criadaKey && r.json.items[2].group === 'mine', r.json);
       check('as recebidas vêm por último; link expirado e Lottie ficam de fora', r.json.groups.chat.total === 3
         && r.json.groups.chat.missing === 2 && r.json.items.length === 4 && r.json.items[3].key === recebidaKey && r.json.items[3].group === 'chat', r.json);
-      r = await juan('GET', `/api/stickers/whatsapp-favorites/${criadaKey}`, undefined, { raw: true });
+      r = await juan('GET', `/api/stickers/whatsapp-favorites/${criadaKey}?name=Juan`, undefined, { raw: true });
       check('prévia da criada (baixada da conversa) chega igual', r.res.status === 200 && r.buf.equals(WEBP_CRIADA));
       r = await juan('POST', '/api/stickers/import-whatsapp', { sender: 'Juan', keys: [criadaKey] });
       check('importa figurinha que só passou por conversa', r.res.status === 200 && r.json.added === 1, r.json);
-      r = await juan('GET', `/api/stickers/whatsapp-favorites/${blueKey}`, undefined, { raw: true });
+      r = await juan('GET', `/api/stickers/whatsapp-favorites/${blueKey}?name=Juan`, undefined, { raw: true });
       check('prévia da favorita (baixada e decifrada) chega igual', r.res.status === 200 && r.buf.equals(WEBP_BLUE)
         && r.res.headers.get('content-type') === 'image/webp' && (r.res.headers.get('content-security-policy') || '').includes('sandbox'));
       r = await juan('GET', '/api/stickers/whatsapp-favorites/nao-e-hash', undefined, { raw: true });
       check('prévia com chave inválida = 404', r.res.status === 404);
-      r = await anon('GET', `/api/stickers/whatsapp-favorites/${redKey}`, undefined, { raw: true });
+      r = await anon('GET', `/api/stickers/whatsapp-favorites/${redKey}?name=Juan`, undefined, { raw: true });
       check('prévia exige sessão', r.res.status === 401);
       r = await juan('POST', '/api/stickers/import-whatsapp', { sender: 'Juan', keys: 'tudo' });
       check('importar sem lista de escolhidas = 400', r.res.status === 400);
       r = await juan('POST', '/api/stickers/import-whatsapp', { sender: 'Juan', keys: [blueKey, 'f'.repeat(64)] });
       check('importa só a escolhida', r.res.status === 200 && r.json.added === 1 && r.json.missing === 1, r.json);
-      r = await juan('GET', '/api/stickers/whatsapp-favorites');
+      r = await juan('GET', '/api/stickers/whatsapp-favorites?name=Juan');
       check('lista marca a que já entrou', r.json.items.find((it) => it.key === blueKey).inLibrary === true
         && r.json.items.find((it) => it.key === redKey).inLibrary === false, r.json);
       r = await juan('POST', '/api/stickers/import-whatsapp', { sender: 'Juan', keys: [blueKey] });
@@ -635,14 +699,14 @@ async function main() {
         && r.json.stickers.filter((st) => st.width === 2).length === 2, r.json.waImport);
       r = await teo('GET', '/api/boot?name=Teo');
       check('…pros dois', r.json.waImport === true);
-      r = await juan('GET', `/api/stickers/whatsapp-favorites/${redKey}`, undefined, { raw: true });
+      r = await juan('GET', `/api/stickers/whatsapp-favorites/${redKey}?name=Juan`, undefined, { raw: true });
       check('prévia da que falta continua aberta', r.res.status === 200 && r.buf.equals(WEBP_RED));
       r = await juan('POST', '/api/stickers/import-whatsapp', { sender: 'Juan', keys: [redKey] });
       check('dá pra voltar e importar outra depois', r.res.status === 200 && r.json.added === 1, r.json);
-      r = await juan('GET', '/api/stickers/whatsapp-favorites');
+      r = await juan('GET', '/api/stickers/whatsapp-favorites?name=Juan');
       check('…e as duas aparecem como já na coleção', favItems(r.json).every((it) => it.inLibrary === true) && r.json.groups.fav.missing === 1, r.json);
       waReceiveFromPhone(waDir, fakeOrigin);
-      r = await juan('GET', '/api/stickers/whatsapp-favorites');
+      r = await juan('GET', '/api/stickers/whatsapp-favorites?name=Juan');
       const sumiuKey = crypto.createHash('sha256').update(WA_SUMIU).digest('hex');
       check('a perdida aparece depois de chegar numa conversa (link da mensagem)', r.json.groups.fav.missing === 0
         && favItems(r.json).length === 3 && r.json.items[2].key === sumiuKey && r.json.items[2].inLibrary === false, r.json);
@@ -651,7 +715,7 @@ async function main() {
       waAddOldStickers(waDir, fakeOrigin);
       const velhaKey = crypto.createHash('sha256').update(WEBP_VELHA).digest('hex');
       for (let i = 0; i < 25; i++) {
-        r = await juan('GET', '/api/stickers/whatsapp-favorites');
+        r = await juan('GET', '/api/stickers/whatsapp-favorites?name=Juan');
         if (r.json.items.some((it) => it.key === velhaKey) && !r.json.recovering) break;
         await new Promise((ok) => setTimeout(ok, 150));
       }
@@ -659,16 +723,82 @@ async function main() {
       check('favorita de link expirado volta pelo celular (pedido ao Bot de Figurinhas)', velha && velha.group === 'fav'
         && r.json.recovering === 0 && r.json.groups.fav.missing === 0, r.json);
       check('…e o arquivo fica guardado em data/wa-cache', fs.existsSync(path.join(DATA_DIR, 'wa-cache', `${velhaKey}.webp`)));
-      r = await juan('GET', `/api/stickers/whatsapp-favorites/${velhaKey}`, undefined, { raw: true });
+      r = await juan('GET', `/api/stickers/whatsapp-favorites/${velhaKey}?name=Juan`, undefined, { raw: true });
       check('prévia da que voltou do celular chega igual', r.res.status === 200 && r.buf.equals(WEBP_VELHA));
       const askedNao = botCalls.filter((b) => b.id === 'NAOTEM1').length;
-      r = await juan('GET', '/api/stickers/whatsapp-favorites');
+      r = await juan('GET', '/api/stickers/whatsapp-favorites?name=Juan');
       await new Promise((ok) => setTimeout(ok, 300));
       check('mandada que o celular não tem mais: pede uma vez só e conta como faltando', askedNao === 1
         && botCalls.filter((b) => b.id === 'NAOTEM1').length === 1 && r.json.groups.mine.missing === 2, { askedNao, groups: r.json.groups });
       check('recebidas antigas não são pedidas ao celular', !botCalls.some((b) => b.remoteJid !== '120363000000000000@g.us'), botCalls.map((b) => b.id));
       r = await anon('POST', '/api/stickers/import-whatsapp', { sender: 'x', keys: [] });
       check('importar exige sessão', r.res.status === 401);
+
+      console.log('\n# cada um conecta o próprio WhatsApp (v51)');
+      r = await teo('GET', '/api/stickers/whatsapp-favorites?name=Teo');
+      check('o Teo não vê as figurinhas do WhatsApp do Juan', r.res.status === 409, r.json);
+      r = await teo('GET', `/api/stickers/whatsapp-favorites/${redKey}?name=Teo`, undefined, { raw: true });
+      check('nem a prévia', r.res.status === 404);
+      r = await teo('POST', '/api/stickers/import-whatsapp', { sender: 'Teo', keys: [redKey] });
+      check('nem importa do WhatsApp do Juan', r.res.status === 409, r.json);
+      r = await teo('POST', '/api/whatsapp/link', { sender: 'Teo', number: '12' });
+      check('número curto = 400', r.res.status === 400, r.json);
+      r = await teo('POST', '/api/whatsapp/link', { sender: 'Teo', number: '11 98888-7777' });
+      check('outro número -> código de pareamento pro celular', r.res.status === 200 && r.json.method === 'pairing' && r.json.code === 'ABCD-1234', r.json);
+      let st = null;
+      for (let i = 0; i < 40; i++) {
+        r = await teo('GET', '/api/whatsapp/status?name=Teo');
+        st = r.json;
+        if (st.linked && st.state === 'ready') break;
+        await new Promise((ok) => setTimeout(ok, 100));
+      }
+      check('depois de digitar no celular: conectado como aparelho', st && st.linked && st.kind === 'device'
+        && st.state === 'ready' && st.number === '+55 11 •••••-7777', st);
+      const teoFavKey = crypto.createHash('sha256').update(TEO_FAV).digest('hex');
+      const teoMineKey = crypto.createHash('sha256').update(TEO_MINE).digest('hex');
+      const teoRecvKey = crypto.createHash('sha256').update(TEO_RECV).digest('hex');
+      for (let i = 0; i < 30; i++) {
+        r = await teo('GET', '/api/stickers/whatsapp-favorites?name=Teo');
+        if (r.json.items && r.json.items.length === 3 && !r.json.recovering) break;
+        await new Promise((ok) => setTimeout(ok, 100));
+      }
+      const keysOf = (j) => (j.items || []).map((it) => `${it.group}:${it.key}`).join(' ');
+      check('Teo vê só as dele: favorita (da sincronização), mandada (voltou pelo celular) e recebida', r.res.status === 200
+        && r.json.source === 'device' && keysOf(r.json) === `fav:${teoFavKey} mine:${teoMineKey} chat:${teoRecvKey}`
+        && r.json.groups.fav.total === 1 && r.json.groups.mine.missing === 0, r.json);
+      check('…e nada do Juan', !r.json.items.some((it) => [redKey, blueKey, criadaKey].includes(it.key)));
+      r = await teo('GET', `/api/stickers/whatsapp-favorites/${teoMineKey}?name=Teo`, undefined, { raw: true });
+      check('prévia da que voltou do celular do Teo chega igual', r.res.status === 200 && r.buf.equals(TEO_MINE));
+      r = await juan('GET', `/api/stickers/whatsapp-favorites/${teoFavKey}?name=Juan`, undefined, { raw: true });
+      check('o Juan não abre as do Teo', r.res.status === 404);
+      const linkFiles = fs.readdirSync(path.join(DATA_DIR, 'wa-links'));
+      const blob = linkFiles.find((f) => f.endsWith('.enc') && f !== 'index.enc');
+      check('conexão do Teo guardada cifrada (sem o número em claro)', blob
+        && !fs.readFileSync(path.join(DATA_DIR, 'wa-links', blob)).toString('latin1').includes('5511988887777'), linkFiles);
+      const libList = (await juan('GET', '/api/stickers')).json.stickers;
+      const libBefore = libList.length;
+      const teoBefore = libList.filter((x) => x.addedBy === 'Teo').length;
+      r = await teo('POST', '/api/stickers/import-whatsapp', { sender: 'Teo', keys: [teoFavKey, teoMineKey] });
+      check('Teo importa as dele', r.res.status === 200 && r.json.added === 2, r.json);
+      r = await juan('GET', '/api/stickers');
+      check('…e elas entram na coleção dos dois', r.json.stickers.length === libBefore + 2
+        && r.json.stickers.filter((x) => x.addedBy === 'Teo').length === teoBefore + 2, { libBefore, n: r.json.stickers.length });
+      r = await teo('GET', '/api/stickers/whatsapp-favorites?name=Teo');
+      check('a lista do Teo marca as importadas', r.json.items.filter((it) => it.inLibrary).length === 2, r.json.items);
+      r = await juan('GET', '/api/stickers/whatsapp-favorites?name=Juan');
+      check('o Juan continua vendo só as do Mac', r.res.status === 200 && r.json.source === 'mac'
+        && !r.json.items.some((it) => [teoFavKey, teoMineKey, teoRecvKey].includes(it.key)), r.json.source);
+      r = await teo('POST', '/api/whatsapp/link', { sender: 'Teo', number: '11 98888-7777' });
+      check('conectar de novo sem desconectar = 400', r.res.status === 400, r.json);
+      r = await teo('POST', '/api/whatsapp/unlink', { sender: 'Teo' });
+      check('Teo desconecta (sai do celular também)', r.res.status === 200 && r.json.removedFromPhone === true, r.json);
+      r = await teo('GET', '/api/whatsapp/status?name=Teo');
+      check('…status volta a não conectado e os arquivos somem', r.json.linked === false
+        && !fs.readdirSync(path.join(DATA_DIR, 'wa-links')).some((f) => f.startsWith(blob.replace('.enc', ''))), r.json);
+      r = await juan('GET', '/api/stickers');
+      check('…e as figurinhas que ele importou continuam na coleção', r.json.stickers.filter((x) => x.addedBy === 'Teo').length === teoBefore + 2);
+      r = await juan('GET', '/api/whatsapp/status?name=Juan');
+      check('a conexão do Juan não mudou', r.json.linked === true && r.json.kind === 'mac');
       await juan('POST', '/api/clear');
       r = await juan('GET', '/api/boot?name=Juan');
       check('limpar a conversa mantém a coleção e o botão', r.json.waImport === true && r.json.stickers.length > 0);
@@ -688,6 +818,7 @@ async function main() {
       ['GET', '/api/starred?name=x'], ['GET', '/api/media-list'], ['GET', '/api/export'], ['GET', '/api/stream'],
       ['GET', '/api/gifs/search?q=a'], ['POST', '/api/typing'], ['POST', '/api/clear'], ['POST', '/api/messages'],
       ['POST', '/api/stickers/from-link'], ['POST', '/api/stickers/convert'], ['POST', '/api/stickers/import-whatsapp'],
+      ['GET', '/api/whatsapp/status?name=x'], ['POST', '/api/whatsapp/link'], ['POST', '/api/whatsapp/verify'], ['POST', '/api/whatsapp/unlink'],
       ['GET', '/api/stickers/giphy-search?q=a']]) {
       r = await guest(method, route, method === 'POST' ? { sender: 'x', text: 'x', name: 'x' } : undefined, { raw: true });
       check(`sessão do Hermes não abre ${method} ${route}`, r.res.status === 401, r.res.status);
@@ -717,6 +848,7 @@ async function main() {
     giphy.close();
     fs.rmSync(DATA_DIR, { recursive: true, force: true });
     if (waDir) fs.rmSync(waDir, { recursive: true, force: true });
+    fs.rmSync(teoPhone, { force: true });
   }
 
   console.log(`\n${passed} ok, ${failed} falharam`);

@@ -160,7 +160,7 @@
         <span id="sticker-giphy-attrib" class="giphy-attrib hidden">GIPHY</span>
       </form>
       <div id="sticker-scroll" class="tray-scroll">
-        <button id="wa-import-btn" type="button" class="wa-import-btn hidden">Importar figurinhas do WhatsApp</button>
+        <button id="wa-import-btn" type="button" class="wa-import-btn hidden">Importar figurinhas do seu WhatsApp</button>
         <div id="sticker-grid" class="sticker-grid"></div>
         <p id="sticker-empty" class="tray-empty hidden">Nenhuma figurinha ainda. Toque no + pra criar a partir de uma foto, vídeo ou GIF da galeria, cole um link do X ou do GIPHY no campo acima — ou segure uma foto na conversa e escolha “Criar figurinha”.</p>
         <div id="sticker-sentinel" class="media-sentinel"></div>
@@ -216,8 +216,9 @@
   </div>
 </div>
 
-<!-- Escolher as figurinhas do WhatsApp (favoritas, mandadas e recebidas)
-     que ainda não estão na coleção.
+<!-- Figurinhas do WhatsApp: cada pessoa conecta o PRÓPRIO WhatsApp e
+     escolhe as figurinhas dela (favoritas, mandadas e recebidas) que ainda
+     não estão na coleção; o que entra fica na coleção dos dois.
      Mesmo esqueleto dos painéis de Mídia e Favoritas. -->
 <div id="wa-panel" class="media-panel hidden">
   <header class="chat-header">
@@ -225,20 +226,47 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 5.5 8 12l6.5 6.5"/></svg>
     </button>
     <span class="title">Figurinhas do WhatsApp</span>
-    <button type="button" id="wa-refresh" class="wa-select-all">Atualizar</button>
+    <button type="button" id="wa-refresh" class="wa-select-all hidden">Atualizar</button>
     <button type="button" id="wa-select-all" class="wa-select-all hidden">Todas</button>
   </header>
   <div id="wa-scroll" class="media-scroll">
+    <div id="wa-account" class="wa-account hidden">
+      <span id="wa-account-text"></span>
+      <button type="button" id="wa-unlink" class="wa-link-btn">Desconectar</button>
+    </div>
+    <div id="wa-connect" class="wa-connect hidden">
+      <p class="wa-connect-lead">Cada um conecta o <b>próprio</b> WhatsApp pra trazer as figurinhas dele. As que você importar ficam na coleção dos dois.</p>
+      <p id="wa-connect-msg" class="wa-connect-msg hidden"></p>
+      <form id="wa-number-form" class="wa-connect-form">
+        <label for="wa-number">Seu número de WhatsApp</label>
+        <input id="wa-number" class="wa-input" type="tel" inputmode="tel" maxlength="24" placeholder="DDD + número" autocomplete="off" name="not-a-phone-field" />
+        <button type="submit" id="wa-number-btn" class="wa-import">Conectar</button>
+      </form>
+      <form id="wa-code-form" class="wa-connect-form hidden">
+        <p>Mandei um código de 6 números pro seu WhatsApp, na conversa <b>“Você”</b> (a de mensagens pra você mesmo).</p>
+        <input id="wa-code" class="wa-input wa-code-input" type="text" inputmode="numeric" maxlength="6" placeholder="000000" autocomplete="one-time-code" name="not-a-code-field" />
+        <button type="submit" id="wa-code-btn" class="wa-import">Confirmar</button>
+        <button type="button" class="wa-link-btn wa-other-number">Usar outro número</button>
+      </form>
+      <div id="wa-pairing" class="wa-connect-form hidden">
+        <p>No celular, abra o WhatsApp → <b>Dispositivos conectados</b> → <b>Conectar dispositivo</b> → <b>Conectar com número de telefone</b> e digite:</p>
+        <button type="button" id="wa-pair-code" class="wa-pair-code" title="Copiar"></button>
+        <p class="wa-hint">Deve chegar uma notificação do WhatsApp pedindo esse código (toque no código pra copiar). Ele vale por uns 2 minutos. Se o celular não aceitar, volte e tente o número sem o 9 depois do DDD.</p>
+        <p id="wa-pair-status" class="wa-hint wa-pair-status"></p>
+        <button type="button" id="wa-pair-retry" class="wa-import hidden">Gerar outro código</button>
+        <button type="button" class="wa-link-btn wa-other-number">Usar outro número</button>
+      </div>
+    </div>
     <p id="wa-note" class="wa-note hidden"></p>
     <div id="wa-grid" class="wa-grid"></div>
     <div id="wa-loading" class="center-state hidden">
       <span class="spin-dot"></span>
-      <span>lendo as figurinhas do WhatsApp deste Mac</span>
+      <span id="wa-loading-text">lendo as figurinhas do seu WhatsApp</span>
     </div>
     <div id="wa-empty" class="center-state hidden"><p id="wa-empty-text"></p></div>
   </div>
   <footer class="wa-footer">
-    <p class="wa-once">Só aparecem as que ainda não estão na coleção. Dá pra voltar aqui quando quiser.</p>
+    <p class="wa-once">Só aparecem as que ainda não estão na coleção. As que você importar ficam pros dois.</p>
     <button type="button" id="wa-import" class="wa-import" disabled>Escolha as figurinhas</button>
   </footer>
 </div>

@@ -389,3 +389,34 @@ flag.
   The "+" accepts `image/*,video/*`; video and GIF go to `/convert` when the
   server has the tools.
 
+
+## WhatsApp de cada pessoa (v51)
+
+- **Each person connects their own WhatsApp** (`lib/whatsapp-links.js`); the
+  import routes take the person's name (`?name=` on GET, `sender` on POST,
+  folded with `prefsKey`) and answer `409 not_linked` until that person
+  connects. What anyone imports still goes to the one shared `data.stickers`.
+- Routes: `GET /api/whatsapp/status?name=`, `POST /api/whatsapp/link
+  {sender, number}`, `POST /api/whatsapp/verify {sender, code}`, `POST
+  /api/whatsapp/cancel`, `POST /api/whatsapp/unlink`.
+- **kind "mac"**: the number matches the Mac WhatsApp (asked to the Bot de
+  Figurinhas, `GET /eu` on the same host/token as `/reenviar`; Brazilian
+  numbers compare by DDD + last 8 digits). The bot sends a 6-digit code to the
+  person's own "Você" chat (`POST /mandar-codigo`); after confirming, that
+  person's source is the old `lib/whatsapp-favorites.js` scan.
+- **kind "device"**: any other number. The server becomes a linked device via
+  Baileys (`baileys` 7.0.0-rc14, ESM, loaded with `import()`), paired with the
+  8-letter code the person types on the phone (`requestPairingCode`). Favorites
+  come from app-state sync: Baileys doesn't handle `favoriteSticker`, it only
+  logs it as `'unprocessable update'` — our custom logger catches that.
+  Sent/received stickers come from history sync + `messages.upsert`; expired
+  links are re-requested from the phone with `updateMediaMessage`. Note: in
+  Baileys v7 `creds.registered` never turns true — "paired" = `creds.account`.
+- Everything is encrypted with the room key under `data/wa-links/`
+  (`index.enc` = who connected what; `<id>.enc` = Baileys creds/keys + sticker
+  catalog; `<id>/` = cached webps). So a connection can only come up after
+  someone logs in; it closes after 15 min idle and reconnects from the blob.
+  Unlink logs the device out of the phone and deletes its files; imported
+  stickers stay.
+- Tests: `WHATSAPP_BAILEYS_MODULE=test/fake-baileys.mjs` +
+  `WHATSAPP_FAKE_DATA` (JSON "phone") replace the real library.
