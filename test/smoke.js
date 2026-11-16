@@ -371,6 +371,7 @@ async function main() {
     WHATSAPP_REUPLOAD_TOKEN: 'token-do-bot',
     WHATSAPP_REUPLOAD_GAP_MS: '0',
     ...(waDir ? { WHATSAPP_IMPORT: '1', WHATSAPP_CONTAINER: waDir } : {}),
+    VAULT_OWNER: 'Juan',
     WHATSAPP_BAILEYS_MODULE: path.join(__dirname, 'fake-baileys.mjs'),
     WHATSAPP_FAKE_DATA: teoPhone,
   };
@@ -806,6 +807,96 @@ async function main() {
       console.log('      (sem sqlite3: pulando as favoritas do WhatsApp)');
     }
 
+    if (process.platform === 'darwin') {
+      console.log('\n# cofre do Juan (v52)');
+      const archiver = require('archiver');
+      const zipOf = (files) => new Promise((resolve, reject) => {
+        const a = archiver('zip');
+        const parts = [];
+        a.on('data', (d) => parts.push(d));
+        a.on('end', () => resolve(Buffer.concat(parts)));
+        a.on('error', reject);
+        for (const [name, buf] of files) a.append(buf, { name });
+        a.finalize();
+      });
+      const AUDIO = Buffer.concat([Buffer.from('OggS'), crypto.randomBytes(200)]);
+      const inner = await zipOf([['00000001-STICKER-2025-03-01-12-34-56.webp', TEO_RECV], ['00000002-AUDIO-2025-03-02-10-00-00.opus', AUDIO], ['_chat.txt', Buffer.from('conversa secreta')]]);
+      const outer = await zipOf([['Pasta/IMG_0001.PNG', PNG], ['Pasta/copia.png', PNG], ['__MACOSX/Pasta/._IMG_0001.PNG', Buffer.from('lixo')], ['Pasta/WhatsApp Chat - X.zip', inner]]);
+      fs.mkdirSync(path.join(DATA_DIR, 'vault', 'inbox'), { recursive: true });
+      const inboxZip = path.join(DATA_DIR, 'vault', 'inbox', 'pacote.zip');
+      fs.writeFileSync(inboxZip, outer);
+      r = await teo('GET', '/api/vault/status?name=Teo');
+      check('cofre não existe pra quem não é o dono', r.res.status === 404);
+      r = await teo('GET', '/api/boot?name=Teo');
+      check('boot: sem botão do cofre pro Teo', r.json.vault === false);
+      r = await juan('GET', '/api/boot?name=Juan');
+      check('boot: botão do cofre pro Juan', r.json.vault === true);
+      r = await juan('GET', '/api/vault/status?name=Juan');
+      check('status: cofre por criar, um zip esperando', r.res.status === 200 && r.json.exists === false && r.json.inbox === 1, r.json);
+      r = await juan('POST', '/api/vault/setup', { sender: 'Juan', code: '123' });
+      check('código curto = 400', r.res.status === 400, r.json);
+      r = await teo('POST', '/api/vault/setup', { sender: 'Teo', code: 'segredo-do-teo' });
+      check('o Teo não cria o cofre', r.res.status === 404);
+      r = await juan('POST', '/api/vault/setup', { sender: 'Juan', code: 'cofre-do-juan' });
+      check('Juan cria o cofre', r.res.status === 200 && r.json.ok, r.json);
+      for (let i = 0; i < 100; i++) {
+        r = await juan('GET', '/api/vault/status?name=Juan');
+        if (!r.json.job && r.json.inbox === 0) break;
+        await new Promise((ok) => setTimeout(ok, 150));
+      }
+      check('importação termina e o zip em claro some', r.json.unlocked && !r.json.job && r.json.inbox === 0 && !fs.existsSync(inboxZip), r.json);
+      check('contagem: 1 foto (cópia repetida fica de fora), 1 figurinha, 1 áudio do export', r.json.counts.image === 1
+        && r.json.counts.sticker === 1 && r.json.counts.audio === 1 && !r.json.counts.video, r.json.counts);
+      const vaultFiles = [];
+      (function walk(d) { for (const f of fs.readdirSync(d)) { const full = path.join(d, f); if (fs.statSync(full).isDirectory()) walk(full); else vaultFiles.push(full); } })(path.join(DATA_DIR, 'vault'));
+      const leaks = vaultFiles.filter((f) => { const b = fs.readFileSync(f); return b.includes(PNG.subarray(0, 16)) || b.includes(Buffer.from('RIFF')) || b.includes(Buffer.from('conversa secreta')) || b.includes(Buffer.from('PK\x03\x04')); });
+      check('nada em claro na pasta do cofre (nem foto, nem figurinha, nem o zip)', leaks.length === 0 && vaultFiles.some((f) => f.includes(`${path.sep}zips${path.sep}`)), leaks);
+      check('nenhum arquivo com extensão de imagem', !vaultFiles.some((f) => /\.(png|jpe?g|webp|heic|mp4|mov|zip)$/i.test(f)));
+      r = await juan('GET', '/api/vault/items?name=Juan');
+      const vItems = r.json.items || [];
+      const vPng = vItems.find((it) => it.kind === 'image');
+      const vSticker = vItems.find((it) => it.kind === 'sticker');
+      const vAudio = vItems.find((it) => it.kind === 'audio');
+      check('itens: data do export do WhatsApp vira a data do item', vSticker && vSticker.from === 'whatsapp'
+        && new Date(vSticker.ts).getFullYear() === 2025 && vPng && vPng.from === 'pasta' && vPng.thumb === true, vItems);
+      r = await juan('GET', `/api/vault/file/${vPng.id}`, undefined, { raw: true });
+      check('foto volta igual', r.res.status === 200 && r.buf.equals(PNG) && (r.res.headers.get('content-security-policy') || '').includes('sandbox'));
+      r = await juan('GET', `/api/vault/thumb/${vPng.id}`, undefined, { raw: true });
+      check('miniatura em JPEG', r.res.status === 200 && r.buf[0] === 0xff && r.buf[1] === 0xd8);
+      r = await juan('GET', `/api/vault/file/${vAudio.id}`, undefined, { raw: true, headers: { Range: 'bytes=0-3' } });
+      check('áudio aceita Range (Safari)', r.res.status === 206 && r.buf.toString() === 'OggS');
+      r = await teo('GET', `/api/vault/file/${vPng.id}`, undefined, { raw: true });
+      check('o Teo não abre o arquivo do cofre', r.res.status === 404);
+      r = await teo('POST', '/api/vault/unlock', { sender: 'Teo', code: 'cofre-do-juan' });
+      check('nem com o código certo, usando outro nome', r.res.status === 404);
+      const before = (await juan('GET', '/api/messages')).json.messages.length;
+      r = await juan('POST', '/api/vault/send', { sender: 'Juan', ids: [vPng.id, vSticker.id] });
+      check('manda do cofre pra conversa', r.res.status === 200 && r.json.sent === 2, r.json);
+      r = await teo('GET', '/api/messages');
+      const last2 = r.json.messages.slice(-2);
+      check('…e chegam como foto (com miniatura) e figurinha', r.json.messages.length === before + 2 && last2[0].type === 'image'
+        && last2[0].thumbId && last2[1].type === 'sticker', last2);
+      r = await teo('GET', `/api/media/${last2[0].mediaId}`, undefined, { raw: true });
+      check('o outro lado abre a foto mandada', r.res.status === 200 && r.buf.equals(PNG));
+      r = await juan('POST', '/api/vault/lock', {});
+      r = await juan('GET', '/api/vault/items?name=Juan');
+      check('trancado: lista = 401', r.res.status === 401);
+      r = await juan('GET', `/api/vault/thumb/${vPng.id}`, undefined, { raw: true });
+      check('trancado: miniatura não abre', r.res.status === 404);
+      r = await juan('POST', '/api/vault/unlock', { sender: 'Juan', code: 'errado-errado' });
+      check('código do cofre errado = 401', r.res.status === 401, r.json);
+      r = await juan('POST', '/api/vault/unlock', { sender: 'Juan', code: 'cofre-do-juan' });
+      check('código certo abre de novo', r.res.status === 200);
+      const recovered = path.join(DATA_DIR, '..', `pc-recuperado-${PORT}.zip`);
+      try {
+        execFileSync(process.execPath, [path.join(__dirname, '..', 'scripts', 'cofre-zip-original.js'), recovered], { env: { ...process.env, DATA_DIR, VAULT_CODE: 'cofre-do-juan' }, stdio: 'ignore' });
+      } catch (e) { /* conferido abaixo */ }
+      check('script recupera o zip original igualzinho', fs.existsSync(recovered) && fs.readFileSync(recovered).equals(outer));
+      fs.rmSync(recovered, { force: true });
+    } else {
+      console.log('      (fora do macOS: pulando o cofre, que usa o sips)');
+    }
+
     console.log('\n# entrada direta do Hermes');
     const guest = makeClient();
     r = await anon('POST', '/api/hermes', { text: 'oi' });
@@ -818,7 +909,7 @@ async function main() {
       ['GET', '/api/starred?name=x'], ['GET', '/api/media-list'], ['GET', '/api/export'], ['GET', '/api/stream'],
       ['GET', '/api/gifs/search?q=a'], ['POST', '/api/typing'], ['POST', '/api/clear'], ['POST', '/api/messages'],
       ['POST', '/api/stickers/from-link'], ['POST', '/api/stickers/convert'], ['POST', '/api/stickers/import-whatsapp'],
-      ['GET', '/api/whatsapp/status?name=x'], ['POST', '/api/whatsapp/link'], ['POST', '/api/whatsapp/verify'], ['POST', '/api/whatsapp/unlink'],
+      ['GET', '/api/whatsapp/status?name=x'], ['GET', '/api/vault/status?name=Juan'], ['POST', '/api/vault/unlock'], ['GET', '/api/vault/items?name=Juan'], ['POST', '/api/whatsapp/link'], ['POST', '/api/whatsapp/verify'], ['POST', '/api/whatsapp/unlink'],
       ['GET', '/api/stickers/giphy-search?q=a']]) {
       r = await guest(method, route, method === 'POST' ? { sender: 'x', text: 'x', name: 'x' } : undefined, { raw: true });
       check(`sessão do Hermes não abre ${method} ${route}`, r.res.status === 401, r.res.status);

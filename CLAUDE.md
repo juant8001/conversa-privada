@@ -420,3 +420,29 @@ flag.
   stickers stay.
 - Tests: `WHATSAPP_BAILEYS_MODULE=test/fake-baileys.mjs` +
   `WHATSAPP_FAKE_DATA` (JSON "phone") replace the real library.
+
+## Cofre do dono (v52)
+
+- `VAULT_OWNER` (name, e.g. `Juan`) turns it on; `/api/boot` returns
+  `vault: true` only for that name (button `#vault-btn` → `#vault-panel`).
+  The name only decides who SEES the button: the vault opens with its own
+  code (scrypt with `data/vault/salt.bin`, a different code from the chat's),
+  so even someone with the chat code can't read it. The vault key lives in
+  `vaultKeys` (Map, session id → key) until lock, logout or restart.
+- `lib/vault.js`: everything under `data/vault/` is ciphertext with no
+  extension (`index.enc`, `blobs/<id>.enc`, `thumbs/<id>.enc`,
+  `zips/<id>.enc` = the original .zip, stream-encrypted as
+  `"PCVZ1" + iv + ciphertext + tag`). `data/vault/inbox/*.zip` is the only
+  plaintext: a zip waiting for import. Import starts on setup/unlock (needs
+  the key), encrypts and verifies the whole zip first, then
+  `lib/vault-extract.py` streams each media member (nested zips too, read in
+  header order so a deflated inner zip is only walked forward) over stdout in
+  frames; HEIC → JPEG and thumbnails use `sips`/ffmpeg in `data/vault/tmp`
+  (0700, deleted right away); then the inbox zip is deleted. Resumable via
+  `index.seen`. Exact duplicates are skipped by SHA-256.
+- Routes: `GET /api/vault/status|items`, `POST /api/vault/setup|unlock|lock|send`,
+  `GET /api/vault/thumb/:id|file/:id` (Range). Sending decrypts with the vault
+  key and re-encrypts with the room key as a normal message.
+- `scripts/cofre-zip-original.js <out.zip>` recovers the original zip.
+- `/api/media` keeps the last big (>8 MB) decrypted file for 2 min so
+  Safari's Range requests don't decrypt a huge video over and over.

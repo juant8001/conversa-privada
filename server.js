@@ -19,6 +19,7 @@ const stickerTools = require('./lib/sticker-tools');
 const stickerLinks = require('./lib/sticker-links');
 const waFavorites = require('./lib/whatsapp-favorites');
 const waLinks = require('./lib/whatsapp-links');
+const vault = require('./lib/vault');
 
 const PORT = parseInt(process.env.PORT || '4177', 10);
 // Default fica em 127.0.0.1 (só a própria máquina). Setar HOST=0.0.0.0 expõe
@@ -116,6 +117,7 @@ if (!ROOM_SLUG || ROOM_SLUG.length < 16) {
 fs.mkdirSync(DATA_DIR, { recursive: true });
 const store = new Store(DATA_DIR);
 waLinks.init({ dataDir: DATA_DIR });
+vault.init({ dataDir: DATA_DIR, ffmpeg: () => stickerTools.tools().ffmpeg });
 const bus = new EventEmitter();
 bus.setMaxListeners(50);
 
@@ -619,6 +621,8 @@ roomRouter.post('/api/login', express.json(), async (req, res) => {
 });
 
 roomRouter.post('/api/logout', (req, res) => {
+  const leaving = auth.getSession(req);
+  if (leaving) vaultKeys.delete(leaving.id); // sair tranca o cofre
   auth.destroySession(req, res, ROOM_PATH);
   const guest = getHermesGuest(req);
   if (guest) hermesGuests.delete(guest);
@@ -1145,6 +1149,7 @@ roomRouter.get('/api/boot', requireAuth, (req, res) => {
       giphy: !!GIPHY_API_KEY,
       stickerTools: stickerTools.available(),
       waImport: waImportOpen(),
+      vault: vault.enabled() && vault.isOwner(req.query && req.query.name),
       hermes: HERMES_HASH ? { salt: HERMES_SALT, hash: HERMES_HASH } : null,
     });
   } catch (e) {
@@ -1713,6 +1718,219 @@ roomRouter.post('/api/stickers/import-whatsapp', requireAuth, async (req, res) =
   }
 });
 
+// ===== Cofre do dono (v52) =====
+// Aba só de VAULT_OWNER com as mídias que vieram de um .zip (lib/vault.js).
+// O nome só decide quem VÊ o botão; quem abre é quem sabe o código do
+// cofre, que é outro código, só do dono. A chave do cofre fica em memória,
+// presa à sessão de quem abriu (some ao trancar, sair ou reiniciar).
+const vaultKeys = new Map(); // id da sessão -> chave do cofre
+
+function vaultOwnerGate(res, name) {
+  if (!vault.enabled() || !vault.isOwner(name)) {
+    res.status(404).json({ error: 'not_found' });
+    return false;
+  }
+  return true;
+}
+
+function vaultError(res, e) {
+  if (e && e.user) return res.status(e.status || 400).json({ error: 'vault', message: e.message });
+  console.error('cofre:', e && e.message);
+  return res.status(500).json({ error: 'vault', message: 'Não deu certo agora.' });
+}
+
+function sendRanged(req, res, buf) {
+  res.setHeader('Accept-Ranges', 'bytes');
+  const total = buf.length;
+  const rm = req.headers.range && /^bytes=(\d*)-(\d*)$/.exec(String(req.headers.range).trim());
+  if (rm && (rm[1] !== '' || rm[2] !== '')) {
+    let start;
+    let end;
+    if (rm[1] === '') {
+      start = Math.max(0, total - parseInt(rm[2], 10));
+      end = total - 1;
+    } else {
+      start = parseInt(rm[1], 10);
+      end = rm[2] === '' ? total - 1 : Math.min(parseInt(rm[2], 10), total - 1);
+    }
+    if (start >= total || start > end) {
+      res.setHeader('Content-Range', `bytes */${total}`);
+      return res.status(416).end();
+    }
+    res.status(206);
+    res.setHeader('Content-Range', `bytes ${start}-${end}/${total}`);
+    return res.send(buf.subarray(start, end + 1));
+  }
+  return res.send(buf);
+}
+
+roomRouter.get('/api/vault/status', requireAuth, (req, res) => {
+  if (!vaultOwnerGate(res, req.query && req.query.name)) return;
+  const key = vaultKeys.get(req.session.id);
+  let counts = null;
+  try {
+    if (key) counts = vault.list(key, { limit: 0 }).counts;
+  } catch (e) {
+    console.error('cofre status:', e && e.stack);
+    vaultKeys.delete(req.session.id);
+  }
+  res.json({
+    exists: vault.exists(),
+    unlocked: !!(key && counts),
+    inbox: vault.inboxZips().length,
+    job: vault.status(),
+    counts,
+  });
+});
+
+roomRouter.post('/api/vault/setup', requireAuth, async (req, res) => {
+  const body = req.body || {};
+  if (!vaultOwnerGate(res, body.sender)) return;
+  try {
+    loadStoreOnly(req);
+    const key = await vault.setup(body.code);
+    vaultKeys.set(req.session.id, key);
+    vault.startImport(key);
+    res.json({ ok: true });
+  } catch (e) {
+    vaultError(res, e);
+  }
+});
+
+roomRouter.post('/api/vault/unlock', requireAuth, async (req, res) => {
+  const body = req.body || {};
+  if (!vaultOwnerGate(res, body.sender)) return;
+  try {
+    loadStoreOnly(req);
+    const key = await vault.unlock(body.code);
+    vaultKeys.set(req.session.id, key);
+    vault.startImport(key); // continua uma importação que parou no meio
+    res.json({ ok: true });
+  } catch (e) {
+    vaultError(res, e);
+  }
+});
+
+roomRouter.post('/api/vault/lock', requireAuth, (req, res) => {
+  vaultKeys.delete(req.session.id);
+  vault.forget();
+  res.json({ ok: true });
+});
+
+function vaultKeyOr401(req, res) {
+  const key = vaultKeys.get(req.session.id);
+  if (!key) {
+    res.status(401).json({ error: 'locked', message: 'O cofre está trancado.' });
+    return null;
+  }
+  return key;
+}
+
+roomRouter.get('/api/vault/items', requireAuth, (req, res) => {
+  if (!vaultOwnerGate(res, req.query && req.query.name)) return;
+  const key = vaultKeyOr401(req, res);
+  if (!key) return;
+  const kind = ['image', 'video', 'audio', 'sticker'].includes(req.query.kind) ? req.query.kind : null;
+  const offset = Math.max(0, parseInt(req.query.offset, 10) || 0);
+  const limit = Math.min(300, Math.max(1, parseInt(req.query.limit, 10) || 120));
+  try {
+    res.json(vault.list(key, { kind, offset, limit }));
+  } catch (e) {
+    vaultError(res, e);
+  }
+});
+
+function vaultMediaHeaders(res, mime, name) {
+  res.setHeader('Content-Type', mime);
+  res.setHeader('Content-Disposition', `inline; filename="${encodeURIComponent(name || 'arquivo')}"`);
+  res.setHeader('Content-Security-Policy', MEDIA_CSP);
+  res.setHeader('Cache-Control', 'private, no-store');
+}
+
+roomRouter.get('/api/vault/thumb/:id', requireAuth, (req, res) => {
+  const key = vaultKeys.get(req.session.id);
+  if (!key || !/^[0-9a-f]{8,64}$/.test(req.params.id)) return res.status(404).end();
+  try {
+    const item = vault.getItem(key, req.params.id);
+    const t = item && vault.readThumb(key, item);
+    if (!t) return res.status(404).end();
+    vaultMediaHeaders(res, t.mime, 'miniatura');
+    res.send(t.buf);
+  } catch (e) {
+    res.status(404).end();
+  }
+});
+
+roomRouter.get('/api/vault/file/:id', requireAuth, (req, res) => {
+  const key = vaultKeys.get(req.session.id);
+  if (!key || !/^[0-9a-f]{8,64}$/.test(req.params.id)) return res.status(404).end();
+  try {
+    const item = vault.getItem(key, req.params.id);
+    if (!item) return res.status(404).end();
+    const buf = vault.readFile(key, item.id);
+    vaultMediaHeaders(res, item.mime, item.name);
+    sendRanged(req, res, buf);
+  } catch (e) {
+    res.status(404).end();
+  }
+});
+
+// Manda as escolhidas na conversa: cada uma vira uma mensagem normal (a
+// mídia é decifrada com a chave do cofre e cifrada de novo com a da
+// conversa, como qualquer envio). Até 10 por vez.
+roomRouter.post('/api/vault/send', requireAuth, (req, res) => {
+  const body = req.body || {};
+  const sender = cleanSender(body.sender);
+  if (!vaultOwnerGate(res, sender)) return;
+  const key = vaultKeyOr401(req, res);
+  if (!key) return;
+  const ids = Array.isArray(body.ids) ? [...new Set(body.ids.filter((x) => typeof x === 'string' && /^[0-9a-f]{8,64}$/.test(x)))] : [];
+  if (!ids.length || ids.length > 10) return res.status(400).json({ error: 'invalid' });
+  try {
+    const data = loadWithSessionKey(req);
+    const sent = [];
+    for (const id of ids) {
+      const item = vault.getItem(key, id);
+      if (!item) continue;
+      const buf = vault.readFile(key, id);
+      const mediaId = randomId(16);
+      store.saveMedia(req.session.key, mediaId, buf);
+      const message = {
+        id: randomId(8),
+        type: item.kind,
+        sender,
+        mediaId,
+        filename: String(item.name || 'arquivo').slice(0, 200),
+        mimeType: item.mime,
+        size: buf.length,
+        ts: Date.now(),
+      };
+      if (item.w && item.h) {
+        message.width = item.w;
+        message.height = item.h;
+      }
+      if (item.mime === 'image/gif') message.gif = true;
+      if ((item.kind === 'image' || item.kind === 'video') && item.thumb) {
+        const t = vault.readThumb(key, item);
+        if (t && t.buf.length <= MAX_THUMB_BYTES) {
+          const thumbId = randomId(16);
+          store.saveMedia(req.session.key, thumbId, t.buf);
+          message.thumbId = thumbId;
+        }
+      }
+      data.messages.push(message);
+      sent.push(message);
+    }
+    if (!sent.length) return res.status(404).json({ error: 'not_found' });
+    store.persist(req.session.key, data);
+    for (const m of sent) bus.emit('message', sanitizeMessage(m));
+    res.json({ ok: true, sent: sent.length });
+  } catch (e) {
+    console.error(e);
+    res.status(500).json({ error: 'vault', message: 'Não consegui mandar agora.' });
+  }
+});
+
 // ===== Busca de GIF (GIPHY, opcional) =====
 function isAllowedGifUrl(raw) {
   let u;
@@ -1959,13 +2177,29 @@ roomRouter.post('/api/clear', requireAuth, (req, res) => {
 // Serve tanto o arquivo original (mediaId) quanto a miniatura (thumbId) -
 // os dois são só blobs cifrados em data/media/, o que muda é o Content-Type
 // e o nome sugerido.
+// Vídeo grande decifrado fica 2 minutos em memória: o Safari pede o arquivo
+// em vários pedaços (Range) e decifrar centenas de MB a cada pedaço trava.
+let bigMediaCache = null; // { id, buf, at }
+function loadMediaCached(req, id) {
+  if (bigMediaCache && bigMediaCache.id === id && Date.now() - bigMediaCache.at < 120000) {
+    bigMediaCache.at = Date.now();
+    return bigMediaCache.buf;
+  }
+  const buf = store.loadMedia(req.session.key, id);
+  if (buf.length > 8 * 1024 * 1024) bigMediaCache = { id, buf, at: Date.now() };
+  return buf;
+}
+setInterval(() => {
+  if (bigMediaCache && Date.now() - bigMediaCache.at > 120000) bigMediaCache = null;
+}, 30000).unref();
+
 roomRouter.get('/api/media/:id', requireAuth, (req, res) => {
   try {
     if (!/^[0-9a-f]{8,64}$/.test(req.params.id)) return res.status(404).end();
     const entry = getMediaIndex(req).get(req.params.id);
     if (!entry || !store.mediaExists(req.params.id)) return res.status(404).end();
     const isThumb = !!entry.thumb;
-    const buf = store.loadMedia(req.session.key, req.params.id);
+    const buf = loadMediaCached(req, req.params.id);
     // A miniatura é sempre JPEG (foi gerada por canvas.toBlob). Usar o
     // mimeType da mensagem aqui entregaria "video/mp4" pra thumb de um vídeo
     // e o <img> da grade não renderizaria nada.

@@ -4125,6 +4125,7 @@
       giphyEnabled = !!data.giphy;
       stickerToolsEnabled = !!data.stickerTools;
       waImportEnabled = !!data.waImport;
+      setVaultEnabled(!!data.vault);
       gifSearchForm.classList.toggle('hidden', !giphyEnabled);
       syncStickerHeader();
       hermesCfg = data.hermes || null;
@@ -5100,6 +5101,445 @@
   waImportBtn.addEventListener('click', () => {
     if (isTouchPrimary) closeTray();
     openWaPanel();
+  });
+
+
+  // ---- Cofre (v52) ----
+  // Só aparece pro dono (o servidor diz no /api/boot) e só abre com o
+  // código do cofre. No Mac tudo fica cifrado; aqui a grade mostra as
+  // miniaturas e cada item vira mensagem normal ao mandar.
+  const vaultBtn = document.getElementById('vault-btn');
+  const vaultPanel = document.getElementById('vault-panel');
+  const vaultBack = document.getElementById('vault-back');
+  const vaultSelectBtn = document.getElementById('vault-select');
+  const vaultLockBtn = document.getElementById('vault-lock');
+  const vaultGate = document.getElementById('vault-gate');
+  const vaultGateText = document.getElementById('vault-gate-text');
+  const vaultGateMsg = document.getElementById('vault-gate-msg');
+  const vaultForm = document.getElementById('vault-form');
+  const vaultCode = document.getElementById('vault-code');
+  const vaultCode2 = document.getElementById('vault-code2');
+  const vaultGateBtn = document.getElementById('vault-gate-btn');
+  const vaultBody = document.getElementById('vault-body');
+  const vaultChips = document.getElementById('vault-chips');
+  const vaultNote = document.getElementById('vault-note');
+  const vaultGrid = document.getElementById('vault-grid');
+  const vaultSentinel = document.getElementById('vault-sentinel');
+  const vaultEmpty = document.getElementById('vault-empty');
+  const vaultEmptyText = document.getElementById('vault-empty-text');
+  const vaultLoading = document.getElementById('vault-loading');
+  const vaultFooter = document.getElementById('vault-footer');
+  const vaultSendBtn = document.getElementById('vault-send');
+  const vaultPreview = document.getElementById('vault-preview');
+  const vaultPreviewMedia = document.getElementById('vault-preview-media');
+  const vaultPreviewSend = document.getElementById('vault-preview-send');
+  const vaultPreviewClose = document.getElementById('vault-preview-close');
+  const VAULT_KINDS = [
+    { id: '', title: 'Tudo' },
+    { id: 'image', title: 'Fotos' },
+    { id: 'video', title: 'Vídeos' },
+    { id: 'audio', title: 'Áudios' },
+    { id: 'sticker', title: 'Figurinhas' },
+  ];
+  let vaultKind = '';
+  let vaultItems = [];
+  let vaultTotal = 0;
+  let vaultCounts = null;
+  let vaultPaging = false;
+  let vaultSeq = 0;
+  let vaultSelectMode = false;
+  const vaultSelected = new Set();
+  let vaultTimer = null;
+  let vaultMode = 'unlock';
+  let vaultPreviewItem = null;
+  let vaultSending = false;
+  let vaultLastDone = -1;
+
+  function setVaultEnabled(on) {
+    vaultBtn.classList.toggle('hidden', !on);
+  }
+
+  const vaultThumbObserver = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      if (!e.isIntersecting) continue;
+      const img = e.target;
+      vaultThumbObserver.unobserve(img);
+      if (img.dataset.src) img.src = img.dataset.src;
+    }
+  }, { root: document.getElementById('vault-scroll'), rootMargin: '600px' });
+
+  const vaultPageObserver = new IntersectionObserver((entries) => {
+    if (entries.some((e) => e.isIntersecting)) loadVaultItems(true);
+  }, { root: document.getElementById('vault-scroll'), rootMargin: '800px' });
+  vaultPageObserver.observe(vaultSentinel);
+
+  function vaultQuery() {
+    return `name=${encodeURIComponent(myName())}`;
+  }
+
+  function fmtDur(s) {
+    if (!Number.isFinite(s)) return '';
+    const m = Math.floor(s / 60);
+    return `${m}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+  }
+
+  function showVaultGate(mode, msg) {
+    vaultMode = mode;
+    clearTimeout(vaultTimer);
+    vaultLoading.classList.add('hidden');
+    vaultBody.classList.add('hidden');
+    vaultFooter.classList.add('hidden');
+    vaultSelectBtn.classList.add('hidden');
+    vaultLockBtn.classList.add('hidden');
+    vaultGate.classList.remove('hidden');
+    vaultCode.value = '';
+    vaultCode2.value = '';
+    const setupMode = mode === 'setup';
+    vaultCode2.classList.toggle('hidden', !setupMode);
+    vaultGateBtn.textContent = setupMode ? 'Criar o cofre' : 'Abrir';
+    vaultGateText.textContent = setupMode
+      ? 'Crie um código só seu pro cofre. Sem ele ninguém abre — nem com o código da conversa — e ele não tem como ser recuperado se você esquecer.'
+      : 'Digite o código do cofre.';
+    vaultGateMsg.textContent = msg || '';
+    vaultGateMsg.classList.toggle('hidden', !msg);
+    vaultForm.classList.toggle('hidden', mode === 'none');
+    if (mode !== 'none' && !isTouchPrimary) vaultCode.focus();
+  }
+
+  async function openVault() {
+    if (!myName()) {
+      focusNameInput();
+      return;
+    }
+    vaultPanel.classList.remove('hidden');
+    vaultGate.classList.add('hidden');
+    vaultBody.classList.add('hidden');
+    vaultLoading.classList.remove('hidden');
+    refreshVault();
+  }
+
+  function closeVault() {
+    if (vaultSending) return;
+    clearTimeout(vaultTimer);
+    closeVaultPreview();
+    vaultSeq += 1;
+    vaultPanel.classList.add('hidden');
+  }
+
+  async function refreshVault(fromPoll) {
+    clearTimeout(vaultTimer);
+    let st;
+    try {
+      const res = await fetch(api(`/api/vault/status?${vaultQuery()}`));
+      st = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(st.message || 'Não consegui abrir o cofre.');
+    } catch (e) {
+      if (fromPoll === true) {
+        vaultTimer = setTimeout(() => refreshVault(true), 5000);
+        return;
+      }
+      showVaultGate('none', e.message);
+      return;
+    }
+    if (vaultPanel.classList.contains('hidden')) return;
+    if (!st.exists) {
+      showVaultGate(st.inbox ? 'setup' : 'none', st.inbox ? '' : 'Não tem nenhum arquivo esperando pra entrar no cofre.');
+      return;
+    }
+    if (!st.unlocked) {
+      showVaultGate('unlock');
+      return;
+    }
+    vaultGate.classList.add('hidden');
+    vaultLoading.classList.add('hidden');
+    vaultBody.classList.remove('hidden');
+    vaultLockBtn.classList.remove('hidden');
+    vaultSelectBtn.classList.remove('hidden');
+    vaultCounts = st.counts || {};
+    renderVaultChips();
+    const job = st.job;
+    if (job) {
+      const pct = job.total ? ` — ${job.done} de ${job.total}` : '';
+      vaultNote.textContent = `Guardando as mídias no cofre (${job.phase}${pct}). Elas vão aparecendo aqui; pode usar enquanto isso.`;
+      vaultNote.classList.remove('hidden');
+      vaultTimer = setTimeout(() => refreshVault(true), 4000);
+    } else {
+      vaultNote.classList.add('hidden');
+    }
+    const done = job ? job.done : -2;
+    const total = Object.values(vaultCounts).reduce((a, b) => a + b, 0);
+    if (fromPoll !== true || done !== vaultLastDone) {
+      vaultLastDone = done;
+      // Na atualização automática só recarrega se ainda está no topo e
+      // nada foi marcado, pra não pular a grade debaixo do dedo.
+      const scroller = document.getElementById('vault-scroll');
+      if (fromPoll !== true || (scroller.scrollTop < 40 && !vaultSelected.size && total !== vaultTotal)) loadVaultItems(false);
+    }
+  }
+
+  function renderVaultChips() {
+    const total = Object.values(vaultCounts || {}).reduce((a, b) => a + b, 0);
+    vaultChips.replaceChildren(...VAULT_KINDS.filter((k) => !k.id || (vaultCounts && vaultCounts[k.id])).map((k) => {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = `vault-chip${vaultKind === k.id ? ' is-on' : ''}`;
+      b.dataset.kind = k.id;
+      b.textContent = `${k.title} ${k.id ? vaultCounts[k.id] : total}`;
+      return b;
+    }));
+  }
+
+  async function loadVaultItems(more) {
+    if (vaultPanel.classList.contains('hidden') || vaultBody.classList.contains('hidden')) return;
+    if (more && (vaultPaging || vaultItems.length >= vaultTotal)) return;
+    const seq = more ? vaultSeq : ++vaultSeq;
+    vaultPaging = true;
+    try {
+      const offset = more ? vaultItems.length : 0;
+      const kind = vaultKind ? `&kind=${vaultKind}` : '';
+      const res = await fetch(api(`/api/vault/items?${vaultQuery()}${kind}&offset=${offset}&limit=120`));
+      const data = await res.json().catch(() => ({}));
+      if (seq !== vaultSeq) return;
+      if (res.status === 401) {
+        showVaultGate('unlock');
+        return;
+      }
+      if (!res.ok) throw new Error(data.message || 'Não consegui ler o cofre.');
+      const items = Array.isArray(data.items) ? data.items : [];
+      vaultTotal = data.total || 0;
+      if (!more) {
+        vaultItems = items;
+        vaultGrid.replaceChildren(...items.map(vaultTile));
+      } else {
+        vaultItems = vaultItems.concat(items);
+        vaultGrid.append(...items.map(vaultTile));
+      }
+      vaultEmpty.classList.toggle('hidden', vaultItems.length > 0);
+      vaultEmptyText.textContent = 'Nada por aqui ainda.';
+    } catch (e) {
+      if (!more) toast(e.message);
+    } finally {
+      if (seq === vaultSeq) vaultPaging = false;
+    }
+  }
+
+  function vaultTile(it) {
+    const tile = document.createElement('button');
+    tile.type = 'button';
+    tile.className = 'media-tile';
+    tile.dataset.id = it.id;
+    if (vaultSelected.has(it.id)) tile.classList.add('is-selected');
+    if (it.kind === 'audio') {
+      const box = document.createElement('div');
+      box.className = 'vault-audio';
+      box.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V6l10-2v12"/><circle cx="6.5" cy="18" r="2.5"/><circle cx="16.5" cy="16" r="2.5"/></svg>';
+      const label = document.createElement('span');
+      label.textContent = it.name || 'áudio';
+      box.appendChild(label);
+      tile.appendChild(box);
+      return tile;
+    }
+    if (it.kind === 'sticker') tile.classList.add('vault-sticker');
+    if (it.kind === 'sticker' || it.thumb) {
+      const img = document.createElement('img');
+      img.alt = '';
+      img.draggable = false;
+      img.decoding = 'async';
+      img.dataset.src = api(`/api/vault/thumb/${it.id}`);
+      img.addEventListener('load', () => img.classList.add('is-loaded'));
+      tile.appendChild(img);
+      vaultThumbObserver.observe(img);
+    } else {
+      const ph = document.createElement('div');
+      ph.className = 'media-tile-placeholder';
+      ph.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3.5" y="5" width="17" height="14" rx="2"/></svg>';
+      tile.appendChild(ph);
+    }
+    if (it.kind === 'video') {
+      const badge = document.createElement('span');
+      badge.className = 'media-tile-badge';
+      badge.textContent = `▶ ${fmtDur(it.dur)}`.trim();
+      tile.appendChild(badge);
+    }
+    return tile;
+  }
+
+  function syncVaultFooter() {
+    vaultFooter.classList.toggle('hidden', !vaultSelectMode);
+    vaultSelectBtn.textContent = vaultSelectMode ? 'Cancelar' : 'Selecionar';
+    const n = vaultSelected.size;
+    vaultSendBtn.disabled = vaultSending || n === 0;
+    if (!vaultSending) {
+      vaultSendBtn.textContent = n === 0 ? 'Escolha o que mandar'
+        : (n === 1 ? 'Mandar 1 na conversa' : `Mandar ${n} na conversa`);
+    }
+  }
+
+  function openVaultPreview(it) {
+    vaultPreviewItem = it;
+    vaultPreviewMedia.replaceChildren();
+    const src = api(`/api/vault/file/${it.id}`);
+    let el;
+    if (it.kind === 'video') {
+      el = document.createElement('video');
+      el.controls = true;
+      el.playsInline = true;
+      el.preload = 'metadata';
+      if (it.thumb) el.poster = api(`/api/vault/thumb/${it.id}`);
+    } else if (it.kind === 'audio') {
+      el = document.createElement('audio');
+      el.controls = true;
+      el.preload = 'metadata';
+    } else {
+      el = document.createElement('img');
+      el.alt = '';
+    }
+    el.src = src;
+    vaultPreviewMedia.appendChild(el);
+    vaultPreview.classList.remove('hidden');
+  }
+
+  function closeVaultPreview() {
+    const media = vaultPreviewMedia.querySelector('video, audio');
+    if (media) media.pause();
+    vaultPreviewMedia.replaceChildren();
+    vaultPreview.classList.add('hidden');
+    vaultPreviewItem = null;
+  }
+
+  async function sendVault(ids) {
+    if (vaultSending || !ids.length) return false;
+    vaultSending = true;
+    syncVaultFooter();
+    let sent = 0;
+    try {
+      for (let i = 0; i < ids.length; i += 10) {
+        if (ids.length > 1) vaultSendBtn.textContent = `Mandando... ${Math.min(i + 10, ids.length)} de ${ids.length}`;
+        const res = await fetch(api('/api/vault/send'), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ sender: myName(), ids: ids.slice(i, i + 10) }),
+        });
+        const data = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(data.message || 'Não consegui mandar agora.');
+        sent += data.sent || 0;
+      }
+      toast(sent === 1 ? 'Mandado na conversa.' : `${sent} mandados na conversa.`);
+      return true;
+    } catch (e) {
+      toast(sent ? `${sent} mandados; o resto falhou: ${e.message}` : e.message, 6000);
+      return false;
+    } finally {
+      vaultSending = false;
+      syncVaultFooter();
+    }
+  }
+
+  vaultBtn.addEventListener('click', openVault);
+  vaultBack.addEventListener('click', closeVault);
+
+  vaultForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const code = vaultCode.value;
+    if (vaultMode === 'setup') {
+      if (code.length < 6) {
+        showVaultGate('setup', 'Use pelo menos 6 caracteres.');
+        return;
+      }
+      if (code !== vaultCode2.value) {
+        showVaultGate('setup', 'Os dois códigos não são iguais.');
+        return;
+      }
+    } else if (!code) return;
+    vaultGateBtn.disabled = true;
+    try {
+      const res = await fetch(api(vaultMode === 'setup' ? '/api/vault/setup' : '/api/vault/unlock'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sender: myName(), code }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.message || 'Não deu certo.');
+      vaultCode.value = '';
+      vaultCode2.value = '';
+      vaultGate.classList.add('hidden');
+      vaultLoading.classList.remove('hidden');
+      vaultKind = '';
+      refreshVault();
+    } catch (err) {
+      showVaultGate(vaultMode, err.message);
+    } finally {
+      vaultGateBtn.disabled = false;
+    }
+  });
+
+  vaultLockBtn.addEventListener('click', async () => {
+    closeVaultPreview();
+    vaultSelectMode = false;
+    vaultSelected.clear();
+    syncVaultFooter();
+    vaultItems = [];
+    vaultGrid.replaceChildren();
+    await fetch(api('/api/vault/lock'), { method: 'POST' }).catch(() => {});
+    showVaultGate('unlock');
+  });
+
+  vaultSelectBtn.addEventListener('click', () => {
+    if (vaultSending) return;
+    vaultSelectMode = !vaultSelectMode;
+    if (!vaultSelectMode) {
+      vaultSelected.clear();
+      vaultGrid.querySelectorAll('.media-tile.is-selected').forEach((t) => t.classList.remove('is-selected'));
+    }
+    syncVaultFooter();
+  });
+
+  vaultChips.addEventListener('click', (e) => {
+    const chip = e.target.closest('.vault-chip');
+    if (!chip || chip.dataset.kind === vaultKind) return;
+    vaultKind = chip.dataset.kind;
+    renderVaultChips();
+    document.getElementById('vault-scroll').scrollTop = 0;
+    loadVaultItems(false);
+  });
+
+  vaultGrid.addEventListener('click', (e) => {
+    const tile = e.target.closest('.media-tile[data-id]');
+    if (!tile) return;
+    const it = vaultItems.find((x) => x.id === tile.dataset.id);
+    if (!it) return;
+    if (vaultSelectMode) {
+      if (vaultSending) return;
+      if (vaultSelected.has(it.id)) vaultSelected.delete(it.id);
+      else vaultSelected.add(it.id);
+      tile.classList.toggle('is-selected', vaultSelected.has(it.id));
+      syncVaultFooter();
+      return;
+    }
+    openVaultPreview(it);
+  });
+
+  vaultSendBtn.addEventListener('click', async () => {
+    const ids = vaultItems.filter((it) => vaultSelected.has(it.id)).map((it) => it.id);
+    if (await sendVault(ids)) {
+      vaultSelected.clear();
+      vaultSelectMode = false;
+      vaultGrid.querySelectorAll('.media-tile.is-selected').forEach((t) => t.classList.remove('is-selected'));
+      syncVaultFooter();
+      closeVault();
+    }
+  });
+
+  vaultPreviewClose.addEventListener('click', closeVaultPreview);
+  vaultPreviewSend.addEventListener('click', async () => {
+    if (!vaultPreviewItem) return;
+    vaultPreviewSend.disabled = true;
+    const ok = await sendVault([vaultPreviewItem.id]);
+    vaultPreviewSend.disabled = false;
+    if (ok) {
+      closeVaultPreview();
+      closeVault();
+    }
   });
 
   // Toque longo / clique direito num item salvo: "Remover da coleção".
