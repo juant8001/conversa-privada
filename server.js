@@ -20,6 +20,8 @@ const stickerLinks = require('./lib/sticker-links');
 const waFavorites = require('./lib/whatsapp-favorites');
 const waLinks = require('./lib/whatsapp-links');
 const vault = require('./lib/vault');
+const audioCompat = require('./lib/audio-compat');
+const { imageSize } = require('./lib/image-size');
 
 const PORT = parseInt(process.env.PORT || '4177', 10);
 // Default fica em 127.0.0.1 (só a própria máquina). Setar HOST=0.0.0.0 expõe
@@ -118,6 +120,26 @@ fs.mkdirSync(DATA_DIR, { recursive: true });
 const store = new Store(DATA_DIR);
 waLinks.init({ dataDir: DATA_DIR });
 vault.init({ dataDir: DATA_DIR, ffmpeg: () => stickerTools.tools().ffmpeg });
+
+// Áudio que o Safari do iPhone não toca (Ogg Opus do WhatsApp/cofre, WebM
+// gravado no Chrome) vira AAC .m4a antes de entrar na conversa - ver
+// lib/audio-compat.js. Devolve null quando não precisa (ou não deu): aí vai
+// o original mesmo.
+const AUDIO_TMP = path.join(DATA_DIR, 'tmp-audio');
+async function compatAudio(buf, mime, name) {
+  if (!audioCompat.needsConversion(mime)) return null;
+  let ffmpeg = null;
+  try { ffmpeg = stickerTools.tools().ffmpeg; } catch (e) { /* sem ffmpeg */ }
+  if (!ffmpeg) return null;
+  try {
+    const out = await audioCompat.toM4a(buf, { ffmpeg, tmpDir: AUDIO_TMP });
+    return { buf: out, mime: 'audio/mp4', filename: audioCompat.m4aName(name) };
+  } catch (e) {
+    // Não é erro do servidor: vai o original. Fica só registrado no log.
+    console.log('audio: não deu pra converter pra m4a, vai o original:', String(e && e.message).split('\n')[0]);
+    return null;
+  }
+}
 const bus = new EventEmitter();
 bus.setMaxListeners(50);
 
@@ -864,7 +886,7 @@ const uploadMediaFields = upload.fields([
   { name: 'thumb', maxCount: 1 },
 ]);
 
-roomRouter.post('/api/media', requireAuth, uploadMediaFields, (req, res) => {
+roomRouter.post('/api/media', requireAuth, uploadMediaFields, async (req, res) => {
   const { sender, replyToId, ephemeral } = req.body || {};
   const file = req.files && req.files.file && req.files.file[0];
   if (!file || !sender || !String(sender).trim()) {
@@ -878,24 +900,36 @@ roomRouter.post('/api/media', requireAuth, uploadMediaFields, (req, res) => {
   // upload (mirrors how ephemeral is parsed just below).
   const mediaWidth = parseDimension(req.body && req.body.width);
   const mediaHeight = parseDimension(req.body && req.body.height);
-  const mime = file.mimetype || 'application/octet-stream';
+  let mime = file.mimetype || 'application/octet-stream';
   let type = 'file';
   if (mime.startsWith('image/')) type = 'image';
   else if (mime.startsWith('video/')) type = 'video';
   else if (mime.startsWith('audio/')) type = 'audio';
+  let fileBuf = file.buffer;
+  let fileName = file.originalname || 'arquivo';
+  // Converte ANTES de ler a conversa: o await no meio de um
+  // load -> push -> persist perderia uma mensagem que chegasse enquanto isso.
+  if (type === 'audio') {
+    const conv = await compatAudio(fileBuf, mime, fileName);
+    if (conv) {
+      fileBuf = conv.buf;
+      mime = conv.mime;
+      fileName = conv.filename;
+    }
+  }
 
   try {
     const data = loadWithSessionKey(req);
     const mediaId = randomId(16);
-    store.saveMedia(req.session.key, mediaId, file.buffer);
+    store.saveMedia(req.session.key, mediaId, fileBuf);
     const message = {
       id: randomId(8),
       type,
       sender: String(sender).trim().slice(0, 60),
       mediaId,
-      filename: (file.originalname || 'arquivo').slice(0, 200),
+      filename: String(fileName).slice(0, 200),
       mimeType: mime,
-      size: file.size,
+      size: fileBuf.length,
       ts: Date.now(),
     };
     if (mediaWidth && mediaHeight) {
@@ -1878,7 +1912,7 @@ roomRouter.get('/api/vault/file/:id', requireAuth, (req, res) => {
 // Manda as escolhidas na conversa: cada uma vira uma mensagem normal (a
 // mídia é decifrada com a chave do cofre e cifrada de novo com a da
 // conversa, como qualquer envio). Até 10 por vez.
-roomRouter.post('/api/vault/send', requireAuth, (req, res) => {
+roomRouter.post('/api/vault/send', requireAuth, async (req, res) => {
   const body = req.body || {};
   const sender = cleanSender(body.sender);
   if (!vaultOwnerGate(res, sender)) return;
@@ -1887,12 +1921,33 @@ roomRouter.post('/api/vault/send', requireAuth, (req, res) => {
   const ids = Array.isArray(body.ids) ? [...new Set(body.ids.filter((x) => typeof x === 'string' && /^[0-9a-f]{8,64}$/.test(x)))] : [];
   if (!ids.length || ids.length > 10) return res.status(400).json({ error: 'invalid' });
   try {
-    const data = loadWithSessionKey(req);
-    const sent = [];
+    // Prepara tudo (decifrar, converter áudio, medir foto) antes de ler a
+    // conversa - mesmo motivo do /api/media: nada de await entre o load e o
+    // persist.
+    const ready = [];
     for (const id of ids) {
       const item = vault.getItem(key, id);
       if (!item) continue;
-      const buf = vault.readFile(key, id);
+      let buf = vault.readFile(key, id);
+      let mime = item.mime;
+      let filename = item.name || 'arquivo';
+      let w = item.w;
+      let h = item.h;
+      if (item.kind === 'audio') {
+        const conv = await compatAudio(buf, mime, filename);
+        if (conv) ({ buf, mime, filename } = conv);
+      }
+      if (item.kind === 'image') {
+        // As medidas guardadas no cofre vieram do sips, que ignora a rotação
+        // do EXIF: foto em pé chegava na conversa com caixa deitada.
+        const d = imageSize(buf);
+        if (d && d.w && d.h) ({ w, h } = d);
+      }
+      ready.push({ item, buf, mime, filename, w, h });
+    }
+    const data = loadWithSessionKey(req);
+    const sent = [];
+    for (const { item, buf, mime, filename, w, h } of ready) {
       const mediaId = randomId(16);
       store.saveMedia(req.session.key, mediaId, buf);
       const message = {
@@ -1900,14 +1955,14 @@ roomRouter.post('/api/vault/send', requireAuth, (req, res) => {
         type: item.kind,
         sender,
         mediaId,
-        filename: String(item.name || 'arquivo').slice(0, 200),
-        mimeType: item.mime,
+        filename: String(filename).slice(0, 200),
+        mimeType: mime,
         size: buf.length,
         ts: Date.now(),
       };
-      if (item.w && item.h) {
-        message.width = item.w;
-        message.height = item.h;
+      if (w && h) {
+        message.width = w;
+        message.height = h;
       }
       if (item.mime === 'image/gif') message.gif = true;
       if ((item.kind === 'image' || item.kind === 'video') && item.thumb) {
@@ -2193,12 +2248,53 @@ setInterval(() => {
   if (bigMediaCache && Date.now() - bigMediaCache.at > 120000) bigMediaCache = null;
 }, 30000).unref();
 
-roomRouter.get('/api/media/:id', requireAuth, (req, res) => {
+// Áudio antigo que já está na conversa em Ogg/WebM: na primeira vez que
+// alguém pede, converte pra .m4a, troca o blob (mesmo id) e corrige o tipo
+// na mensagem. Daí em diante é servido direto. Um pedido por vez por id (o
+// Safari faz vários pedidos de Range seguidos pro mesmo áudio).
+const audioFixInflight = new Map();
+const audioFixFailed = new Set(); // não insiste a cada pedido num que não converte
+function fixOldAudio(req, id, entry) {
+  if (audioFixFailed.has(id)) return Promise.resolve(null);
+  if (audioFixInflight.has(id)) return audioFixInflight.get(id);
+  const job = (async () => {
+    const original = store.loadMedia(req.session.key, id);
+    const conv = await compatAudio(original, entry.mimeType, entry.filename);
+    if (!conv) {
+      audioFixFailed.add(id);
+      return null;
+    }
+    // Trecho síncrono: grava o blob novo e ajusta a mensagem na mesma volta.
+    store.saveMedia(req.session.key, id, conv.buf);
+    const data = loadStoreOnly(req);
+    let changed = false;
+    for (const m of data.messages) {
+      if (m.mediaId === id) {
+        m.mimeType = conv.mime;
+        m.filename = String(conv.filename).slice(0, 200);
+        m.size = conv.buf.length;
+        changed = true;
+      }
+    }
+    if (changed) store.persist(req.session.key, data);
+    mediaIndexCache = null;
+    if (bigMediaCache && bigMediaCache.id === id) bigMediaCache = null;
+    return conv;
+  })().finally(() => audioFixInflight.delete(id));
+  audioFixInflight.set(id, job);
+  return job;
+}
+
+roomRouter.get('/api/media/:id', requireAuth, async (req, res) => {
   try {
     if (!/^[0-9a-f]{8,64}$/.test(req.params.id)) return res.status(404).end();
-    const entry = getMediaIndex(req).get(req.params.id);
+    let entry = getMediaIndex(req).get(req.params.id);
     if (!entry || !store.mediaExists(req.params.id)) return res.status(404).end();
     const isThumb = !!entry.thumb;
+    if (!isThumb && audioCompat.needsConversion(entry.mimeType)) {
+      const conv = await fixOldAudio(req, req.params.id, entry);
+      if (conv) entry = { mimeType: conv.mime, filename: conv.filename };
+    }
     const buf = loadMediaCached(req, req.params.id);
     // A miniatura é sempre JPEG (foi gerada por canvas.toBlob). Usar o
     // mimeType da mensagem aqui entregaria "video/mp4" pra thumb de um vídeo

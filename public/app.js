@@ -1607,6 +1607,7 @@
         // post-load) so the ancestor's fit-content pass always has a
         // definite number to work with, load state or not.
         reserveMediaBox(img, m.width, m.height);
+        img.addEventListener('load', () => fixMediaRatio(img, img.naturalWidth, img.naturalHeight), { once: true });
       }
       img.addEventListener('click', () => openLightbox('image', img.src));
       wrap.appendChild(img);
@@ -1662,6 +1663,7 @@
         // See the matching comments in the image branch above.
         vid.style.aspectRatio = `${m.width} / ${m.height}`;
         reserveMediaBox(vid, m.width, m.height);
+        vid.addEventListener('loadedmetadata', () => fixMediaRatio(vid, vid.videoWidth, vid.videoHeight), { once: true });
       }
       wrap.appendChild(vid);
       wrap.appendChild(makeTimeEl(m.ts, true));
@@ -2494,6 +2496,20 @@
   // natural size the browser now has) the moment the file actually loads,
   // so live resizing via --media-max-w keeps working exactly as before
   // this existed.
+  // Mídia que chegou com largura/altura erradas (fotos do cofre medidas sem
+  // a rotação do EXIF: foto em pé com caixa deitada, ou o contrário). Quando
+  // o arquivo carrega, o navegador sabe o tamanho real já girado - se a
+  // proporção não bate com a que veio na mensagem, vale a real.
+  function fixMediaRatio(el, nw, nh) {
+    if (!nw || !nh) return;
+    const aw = parseInt(el.getAttribute('width'), 10);
+    const ah = parseInt(el.getAttribute('height'), 10);
+    if (aw && ah && Math.abs(nw / nh - aw / ah) / (aw / ah) < 0.02) return;
+    el.width = nw;
+    el.height = nh;
+    el.style.aspectRatio = `${nw} / ${nh}`;
+  }
+
   function reserveMediaBox(el, width, height) {
     const cs = getComputedStyle(messagesEl);
     const maxW = parseFloat(cs.getPropertyValue('--media-max-w')) || 260;

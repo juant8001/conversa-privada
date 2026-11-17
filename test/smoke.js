@@ -214,6 +214,27 @@ insert into ZWAMEDIAITEM values (2, 3, '${b64sha(WA_SUMIU)}', null, '${mediaOrig
   });
 }
 
+// JPEG de verdade (ffmpeg) com "Orientation = 6" (girar 90°) enfiado logo
+// depois do SOI: é assim que chega foto de iPhone tirada em pé.
+function rotatedJpeg(w, h) {
+  const tmp = path.join(os.tmpdir(), `pc-rot-${process.pid}.jpg`);
+  execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi', '-i', `color=c=red:s=${w}x${h}`, '-frames:v', '1', tmp]);
+  const jpg = fs.readFileSync(tmp);
+  fs.rmSync(tmp, { force: true });
+  const tiff = Buffer.from([0x4d, 0x4d, 0, 0x2a, 0, 0, 0, 8, 0, 1, 0x01, 0x12, 0, 3, 0, 0, 0, 1, 0, 6, 0, 0, 0, 0, 0, 0]);
+  const body = Buffer.concat([Buffer.from('Exif\0\0', 'latin1'), tiff]);
+  const app1 = Buffer.concat([Buffer.from([0xff, 0xe1, (body.length + 2) >> 8, (body.length + 2) & 0xff]), body]);
+  return Buffer.concat([jpg.subarray(0, 2), app1, jpg.subarray(2)]);
+}
+
+function realAudio(fmt) {
+  const tmp = path.join(os.tmpdir(), `pc-audio-${process.pid}.${fmt}`);
+  execFileSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', '-f', 'lavfi', '-i', 'sine=f=440:d=1', '-c:a', 'libopus', tmp]);
+  const buf = fs.readFileSync(tmp);
+  fs.rmSync(tmp, { force: true });
+  return buf;
+}
+
 function hasBin(name) {
   try {
     execFileSync('which', [name], { stdio: 'ignore' });
@@ -508,6 +529,20 @@ async function main() {
     r = await juan('POST', '/api/media', form({ sender: 'Juan', file: { buffer: Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>'), type: 'image/svg+xml', name: 'x.svg' } }));
     r = await juan('GET', `/api/media/${r.json.message.mediaId}`, undefined, { raw: true });
     check('svg enviado vira download', (r.res.headers.get('content-disposition') || '').startsWith('attachment'));
+    if (hasBin('ffmpeg')) {
+      // Áudio gravado no Chrome (WebM/Opus) não toca no Safari do iPhone.
+      r = await juan('POST', '/api/media', form({ sender: 'Juan', file: { buffer: realAudio('webm'), type: 'audio/webm;codecs=opus', name: 'voz.webm' } }));
+      const voice = r.json.message;
+      check('áudio WebM vira .m4a (toca no iPhone)', voice.type === 'audio' && voice.mimeType === 'audio/mp4' && /\.m4a$/.test(voice.filename), voice);
+      r = await teo('GET', `/api/media/${voice.mediaId}`, undefined, { raw: true, headers: { Range: 'bytes=0-11' } });
+      check('…e o outro lado recebe um MP4 de verdade', r.res.status === 206 && r.buf.toString('latin1', 4, 8) === 'ftyp'
+        && r.res.headers.get('content-type') === 'audio/mp4');
+    }
+    // Áudio que não dá pra converter: vai o original mesmo, sem quebrar nada.
+    r = await juan('POST', '/api/media', form({ sender: 'Juan', file: { buffer: Buffer.from('OggS-nao-e-audio'), type: 'audio/ogg', name: 'x.opus' } }));
+    check('áudio que não converte entra do jeito que veio', r.res.status === 200 && r.json.message.mimeType === 'audio/ogg');
+    r = await teo('GET', `/api/media/${r.json.message.mediaId}`, undefined, { raw: true });
+    check('…e continua abrindo', r.res.status === 200 && r.buf.toString() === 'OggS-nao-e-audio');
     r = await juan('GET', '/api/media/naoexiste', undefined, { raw: true });
     check('id de mídia inválido = 404', r.res.status === 404);
     r = await anon('GET', `/api/media/${photo.mediaId}`, undefined, { raw: true });
@@ -819,9 +854,13 @@ async function main() {
         for (const [name, buf] of files) a.append(buf, { name });
         a.finalize();
       });
-      const AUDIO = Buffer.concat([Buffer.from('OggS'), crypto.randomBytes(200)]);
+      const withFfmpeg = hasBin('ffmpeg');
+      const AUDIO = withFfmpeg ? realAudio('opus') : Buffer.concat([Buffer.from('OggS'), crypto.randomBytes(200)]);
+      const ROT = withFfmpeg ? rotatedJpeg(64, 32) : null; // gravada 64x32, aparece 32x64
       const inner = await zipOf([['00000001-STICKER-2025-03-01-12-34-56.webp', TEO_RECV], ['00000002-AUDIO-2025-03-02-10-00-00.opus', AUDIO], ['_chat.txt', Buffer.from('conversa secreta')]]);
-      const outer = await zipOf([['Pasta/IMG_0001.PNG', PNG], ['Pasta/copia.png', PNG], ['__MACOSX/Pasta/._IMG_0001.PNG', Buffer.from('lixo')], ['Pasta/WhatsApp Chat - X.zip', inner]]);
+      const outerFiles = [['Pasta/IMG_0001.PNG', PNG], ['Pasta/copia.png', PNG], ['__MACOSX/Pasta/._IMG_0001.PNG', Buffer.from('lixo')], ['Pasta/WhatsApp Chat - X.zip', inner]];
+      if (ROT) outerFiles.push(['Pasta/IMG_0002.JPG', ROT]);
+      const outer = await zipOf(outerFiles);
       fs.mkdirSync(path.join(DATA_DIR, 'vault', 'inbox'), { recursive: true });
       const inboxZip = path.join(DATA_DIR, 'vault', 'inbox', 'pacote.zip');
       fs.writeFileSync(inboxZip, outer);
@@ -845,7 +884,7 @@ async function main() {
         await new Promise((ok) => setTimeout(ok, 150));
       }
       check('importação termina e o zip em claro some', r.json.unlocked && !r.json.job && r.json.inbox === 0 && !fs.existsSync(inboxZip), r.json);
-      check('contagem: 1 foto (cópia repetida fica de fora), 1 figurinha, 1 áudio do export', r.json.counts.image === 1
+      check('contagem: 1 foto (cópia repetida fica de fora), 1 figurinha, 1 áudio do export', r.json.counts.image === (ROT ? 2 : 1)
         && r.json.counts.sticker === 1 && r.json.counts.audio === 1 && !r.json.counts.video, r.json.counts);
       const vaultFiles = [];
       (function walk(d) { for (const f of fs.readdirSync(d)) { const full = path.join(d, f); if (fs.statSync(full).isDirectory()) walk(full); else vaultFiles.push(full); } })(path.join(DATA_DIR, 'vault'));
@@ -854,7 +893,8 @@ async function main() {
       check('nenhum arquivo com extensão de imagem', !vaultFiles.some((f) => /\.(png|jpe?g|webp|heic|mp4|mov|zip)$/i.test(f)));
       r = await juan('GET', '/api/vault/items?name=Juan');
       const vItems = r.json.items || [];
-      const vPng = vItems.find((it) => it.kind === 'image');
+      const vPng = vItems.find((it) => it.kind === 'image' && it.mime === 'image/png');
+      const vRot = vItems.find((it) => it.kind === 'image' && it.mime === 'image/jpeg');
       const vSticker = vItems.find((it) => it.kind === 'sticker');
       const vAudio = vItems.find((it) => it.kind === 'audio');
       check('itens: data do export do WhatsApp vira a data do item', vSticker && vSticker.from === 'whatsapp'
@@ -865,6 +905,17 @@ async function main() {
       check('miniatura em JPEG', r.res.status === 200 && r.buf[0] === 0xff && r.buf[1] === 0xd8);
       r = await juan('GET', `/api/vault/file/${vAudio.id}`, undefined, { raw: true, headers: { Range: 'bytes=0-3' } });
       check('áudio aceita Range (Safari)', r.res.status === 206 && r.buf.toString() === 'OggS');
+      if (ROT) {
+        check('foto girada (EXIF) medida em pé no cofre', vRot && vRot.w === 32 && vRot.h === 64, vRot);
+        r = await juan('POST', '/api/vault/send', { sender: 'Juan', ids: [vRot.id, vAudio.id] });
+        check('manda foto girada + áudio do cofre', r.res.status === 200 && r.json.sent === 2, r.json);
+        r = await teo('GET', '/api/messages');
+        const [mRot, mAud] = r.json.messages.slice(-2);
+        check('…foto chega com a proporção certa (em pé)', mRot.type === 'image' && mRot.width === 32 && mRot.height === 64, mRot);
+        check('…áudio .opus do WhatsApp chega como .m4a', mAud.type === 'audio' && mAud.mimeType === 'audio/mp4' && /\.m4a$/.test(mAud.filename), mAud);
+        r = await teo('GET', `/api/media/${mAud.mediaId}`, undefined, { raw: true, headers: { Range: 'bytes=0-11' } });
+        check('…e o Teo recebe MP4', r.res.status === 206 && r.buf.toString('latin1', 4, 8) === 'ftyp');
+      }
       r = await teo('GET', `/api/vault/file/${vPng.id}`, undefined, { raw: true });
       check('o Teo não abre o arquivo do cofre', r.res.status === 404);
       r = await teo('POST', '/api/vault/unlock', { sender: 'Teo', code: 'cofre-do-juan' });
