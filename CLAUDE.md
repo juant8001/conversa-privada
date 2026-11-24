@@ -478,10 +478,13 @@ flag.
   `data.changelogVersion`. Store novo só marca a versão. Testes:
   `CHANGELOG_JSON`. Nunca no portal do Hermes.
 - **Cofre**: `POST /api/vault/upload` (dono, cofre aberto) → `vault.addUpload`.
-- **Foto do coração** (só do dono, fora do changelog de propósito):
-  `data.heartPhoto` + rotas `/api/heart-photo*` (todas com `vaultOwnerGate`;
-  salvar/tirar exigem cofre aberto). `heart` no boot só vai pro dono. O
-  cliente (`looksLikeHeart`, `playHeartFx`, `openHeartEditor`) só reconhece o
-  gesto quando `heartEnabled`.
+- **Foto do coração** (fora do changelog de propósito): só o dono escolhe a
+  foto (`data.heartPhoto`; `POST /api/heart-photo`, `/remove` e `GET /crop`
+  com `vaultOwnerGate`, salvar/tirar exigem cofre aberto). Desde a v55 o
+  gesto vale pros dois: `heart` vai no boot de todo mundo e `GET
+  /api/heart-photo` serve a foto pra qualquer sessão (quem desenha vê a foto
+  na própria tela). Trocar/tirar a foto emite `heart-changed` no SSE. O
+  cliente (`looksLikeHeart`, `playHeartFx`) só reconhece o gesto quando
+  `heartEnabled`; o editor só abre pelo cofre (dono).
 - Classes das folhas novas são `pc-sheet*` (já existe `.sheet-card` /
   `.sheet-title` na folha de emojis).

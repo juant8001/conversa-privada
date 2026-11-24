@@ -2977,6 +2977,12 @@
       patchLoadedMessage(id, { starredBy });
       applyStar(id, starredBy);
     });
+    es.addEventListener('heart-changed', (evt) => {
+      try {
+        const d = JSON.parse(evt.data);
+        if (heartEnabled) applyHeartConfig({ photo: d.photo || null });
+      } catch (e) { /* ignora */ }
+    });
     es.addEventListener('stickers-changed', () => {
       refreshLibrary();
     });
@@ -6892,11 +6898,10 @@
   // =====================================================================
   // Coração desenhado a dedo (só do dono do cofre)
   //
-  // Recurso surpresa: só existe pro dono (o servidor manda `heart` no boot
-  // só pra ele, e a imagem só sai pra ele). Ele escolhe uma foto do cofre e
-  // enquadra dentro do coração; quando desenha um coração com o dedo (ou o
-  // mouse) por cima da conversa, aparece uma animação rápida (~3s) com a
-  // foto dentro - só na tela dele.
+  // O dono do cofre escolhe uma foto do cofre e enquadra dentro do coração.
+  // Qualquer um dos dois que desenhar um coração com o dedo (ou o mouse) por
+  // cima da conversa vê uma animação rápida (~3s) com essa foto dentro, só
+  // na própria tela. Trocar a foto chega pro outro na hora (heart-changed).
   // =====================================================================
   const HEART_PATH = 'M50 86 C 22 66 3 50 3 29 C 3 14 14 3 28 3 C 38 3 46 9 50 18 C 54 9 62 3 72 3 C 86 3 97 14 97 29 C 97 50 78 66 50 86 Z';
   const HEART_FX_MS = 3000;

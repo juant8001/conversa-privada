@@ -1366,8 +1366,9 @@ roomRouter.get('/api/boot', requireAuth, (req, res) => {
       stickerTools: stickerTools.available(),
       waImport: waImportOpen(),
       vault: vault.enabled() && vault.isOwner(req.query && req.query.name),
-      // Só pro dono (recurso surpresa, ver "Coração desenhado a dedo").
-      heart: vault.enabled() && vault.isOwner(req.query && req.query.name) ? { photo: heartPublic(data) } : null,
+      // Coração desenhado a dedo: liga pros dois (quem desenha vê a foto);
+      // só o dono do cofre escolhe a foto.
+      heart: vault.enabled() ? { photo: heartPublic(data) } : null,
       hermes: HERMES_HASH ? { salt: HERMES_SALT, hash: HERMES_HASH } : null,
     });
   } catch (e) {
@@ -2145,8 +2146,10 @@ function heartPublic(data) {
   return { v: h.ts, by: h.by };
 }
 
+// A foto recortada sai pros dois (quem desenhar o coração vê a animação com
+// ela). Escolher/tirar a foto continua só do dono, com o cofre aberto.
 roomRouter.get('/api/heart-photo', requireAuth, (req, res) => {
-  if (!vaultOwnerGate(res, req.query && req.query.name)) return;
+  if (!vault.enabled()) return res.status(404).end();
   try {
     const data = loadStoreOnly(req);
     const h = data.heartPhoto;
@@ -2208,6 +2211,7 @@ roomRouter.post('/api/heart-photo', requireAuth, uploadHeart, (req, res) => {
     };
     if (old && old.mediaId && !mediaStillReferenced(data, old.mediaId)) store.deleteMediaFile(old.mediaId);
     store.persist(req.session.key, data);
+    bus.emit('heart-changed', { photo: heartPublic(data) });
     res.json({ ok: true, photo: heartPublic(data) });
   } catch (e) {
     console.error(e);
@@ -2225,6 +2229,7 @@ roomRouter.post('/api/heart-photo/remove', requireAuth, (req, res) => {
     delete data.heartPhoto;
     if (old && old.mediaId && !mediaStillReferenced(data, old.mediaId)) store.deleteMediaFile(old.mediaId);
     store.persist(req.session.key, data);
+    bus.emit('heart-changed', { photo: null });
     res.json({ ok: true });
   } catch (e) {
     res.status(401).json({ error: 'unauthenticated' });
@@ -2834,7 +2839,7 @@ roomRouter.get('/api/stream', requireAuth, (req, res) => {
 
   // Eventos que são só "repasse cru" pro cliente: favoritar, mudança na
   // coleção de figurinhas/GIFs e "digitando…".
-  const passthrough = ['message-starred', 'stickers-changed', 'typing', 'message-edited'].map((name) => {
+  const passthrough = ['message-starred', 'stickers-changed', 'typing', 'message-edited', 'heart-changed'].map((name) => {
     const fn = (payload) => {
       res.write(`event: ${name}\ndata: ${JSON.stringify(payload)}\n\n`);
     };

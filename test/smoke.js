@@ -1066,9 +1066,13 @@ async function main() {
       r = await juan('GET', '/api/heart-photo?name=Juan', undefined, { raw: true });
       check('foto do coração volta pro dono', r.res.status === 200 && r.buf.equals(PNG));
       r = await teo('GET', '/api/heart-photo?name=Teo', undefined, { raw: true });
-      check('Teo não baixa a foto do coração', r.res.status === 404);
+      check('Teo também recebe a foto do coração (vê quando desenha)', r.res.status === 200 && r.buf.equals(PNG));
       r = await teo('GET', '/api/boot?name=Teo');
-      check('boot do Teo não sabe do coração', r.json.heart === null);
+      check('boot do Teo liga o coração com a foto', r.json.heart && r.json.heart.photo && typeof r.json.heart.photo.v === 'number');
+      r = await teo('GET', '/api/heart-photo/crop?name=Teo');
+      check('enquadramento continua só do dono', r.res.status === 404);
+      r = await teo('POST', '/api/heart-photo/remove', { name: 'Teo' });
+      check('Teo não tira a foto do coração', r.res.status === 404);
       r = await juan('GET', '/api/boot?name=Juan');
       check('boot do Juan liga o coração', r.json.heart && r.json.heart.photo && typeof r.json.heart.photo.v === 'number');
       r = await juan('GET', '/api/heart-photo/crop?name=Juan');
