@@ -249,7 +249,7 @@
     if (m.deleted) return `Mensagem apagada por ${m.deletedBy || m.sender}`;
     if (m.type === 'text') return m.text.length > 140 ? `${m.text.slice(0, 140)}...` : m.text;
     if (isGifMessage(m)) return 'GIF';
-    const labels = { image: '📷 Foto', video: '🎥 Video', audio: '🎤 Audio', file: '📄 Arquivo', sticker: 'Figurinha' };
+    const labels = { image: '📷 Foto', video: '🎥 Vídeo', audio: '🎤 Áudio', file: '📄 Arquivo', sticker: 'Figurinha' };
     return labels[m.type] || 'Arquivo';
   }
 
@@ -439,9 +439,19 @@
     return 'active';
   }
 
+  // v56: a presença usa o nome CONFIRMADO (o que ficou salvo), não o que
+  // está escrito no campo naquele instante. Antes, enquanto alguém editava o
+  // nome, as batidas levavam "J", "Ju", "Jua"... e cada pedaço virava uma
+  // pessoa na lista de quem está aqui.
+  function presenceName() {
+    let saved = '';
+    try { saved = (localStorage.getItem(NAME_KEY) || '').trim(); } catch (e) { /* segue */ }
+    return saved || myName();
+  }
+
   function beatPresence() {
     if (!presenceActive) return;
-    const name = myName();
+    const name = presenceName();
     if (!name) return;
     const state = currentPresenceState();
     lastSentPresence = `${name}|${state}`;
@@ -460,9 +470,9 @@
   // Saindo/escondendo a página: sendBeacon chega mesmo com a aba sendo
   // fechada ou congelada pelo iOS.
   function beatPresenceOnExit() {
-    if (!presenceActive || !myName()) return;
-    lastSentPresence = `${myName()}|hidden`;
-    const body = JSON.stringify({ cid: PRESENCE_CID, name: myName(), state: 'hidden', device: DEVICE_LABEL });
+    if (!presenceActive || !presenceName()) return;
+    lastSentPresence = `${presenceName()}|hidden`;
+    const body = JSON.stringify({ cid: PRESENCE_CID, name: presenceName(), state: 'hidden', device: DEVICE_LABEL });
     try {
       if (navigator.sendBeacon && navigator.sendBeacon(api('/api/presence'), new Blob([body], { type: 'text/plain' }))) return;
     } catch (e) { /* cai no fetch */ }
@@ -472,8 +482,8 @@
   }
 
   function checkPresenceChange() {
-    if (!presenceActive || !myName()) return;
-    const sig = `${myName()}|${currentPresenceState()}`;
+    if (!presenceActive || !presenceName()) return;
+    const sig = `${presenceName()}|${currentPresenceState()}`;
     if (sig !== lastSentPresence) beatPresence();
   }
 
@@ -1282,6 +1292,8 @@
     const previous = localStorage.getItem(NAME_KEY) || '';
     localStorage.setItem(NAME_KEY, name);
     if (name !== previous) {
+      // Presença: o nome novo vale a partir de agora (o antigo some sozinho).
+      if (name) beatPresence();
       rerenderLoadedMessages();
       // Atalhos de reação e favoritas são por nome.
       loadBoot();
@@ -1876,6 +1888,7 @@
       }
       wrap.appendChild(vid);
       wrap.appendChild(makeTimeEl(m.ts, true));
+      wrap.appendChild(makeMediaMenuBtn(m.id, 'on-video'));
       bubble.appendChild(wrap);
     } else if (m.type === 'audio') {
       const audio = document.createElement('audio');
@@ -1883,6 +1896,7 @@
       audio.controls = true;
       bubble.appendChild(audio);
       bubble.appendChild(makeTimeEl(m.ts));
+      bubble.appendChild(makeMediaMenuBtn(m.id, 'on-audio'));
     } else {
       bubble.classList.add('file-bubble');
       bubble.innerHTML =
@@ -1895,6 +1909,27 @@
         window.open(api(`/api/media/${m.mediaId}`), '_blank');
       });
     }
+  }
+
+  // v56: vídeo e áudio ocupam o balão inteiro com os controles nativos, e o
+  // toque longo neles é do player (senão não dava pra arrastar a barra) -
+  // então não havia como abrir o menu (Responder, Reagir, Favoritar...)
+  // num vídeo pelo celular. Este botãozinho no canto abre o mesmo menu.
+  function makeMediaMenuBtn(id, variant) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = `media-menu-btn ${variant || ''}`.trim();
+    btn.setAttribute('aria-label', 'Responder, reagir e mais');
+    btn.title = 'Responder, reagir e mais';
+    btn.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 14 4 9l5-5"/><path d="M4 9h10.5a5.5 5.5 0 0 1 0 11H11"/></svg>';
+    btn.addEventListener('pointerdown', (e) => e.stopPropagation());
+    btn.addEventListener('click', (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      const bubble = btn.closest('.bubble');
+      openMessageMenu(id, { rect: (bubble || btn).getBoundingClientRect() });
+    });
+    return btn;
   }
 
   // "Visualização única": a locked placeholder instead of the real photo/
@@ -2938,7 +2973,7 @@
     if (es) es.close();
     announcedPresenceOnEntry = false;
     const presenceQs = `cid=${PRESENCE_CID}&device=${encodeURIComponent(DEVICE_LABEL)}&state=${currentPresenceState()}`;
-    es = new EventSource(api(`/api/stream?name=${encodeURIComponent(myName())}&${presenceQs}`));
+    es = new EventSource(api(`/api/stream?name=${encodeURIComponent(presenceName())}&${presenceQs}`));
     startPresence();
     // Reconectou (rede caiu, celular acordou): manda o estado de agora.
     es.addEventListener('open', () => beatPresence());
@@ -6687,12 +6722,44 @@
         info.appendChild(ul);
       }
       row.append(av, info);
+      // v56: quem não está aqui agora pode sair da lista (nome digitado
+      // errado, gente que não volta mais). Se a pessoa entrar de novo, ela
+      // reaparece sozinha.
+      if (!isMe && p.state === 'offline' && !devices.length) {
+        const rm = document.createElement('button');
+        rm.type = 'button';
+        rm.className = 'presence-forget';
+        rm.title = `Tirar ${p.name} da lista`;
+        rm.setAttribute('aria-label', `Tirar ${p.name} da lista`);
+        rm.innerHTML = '<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"><path d="M6 6l12 12M18 6 6 18"/></svg>';
+        rm.addEventListener('click', () => forgetPresencePerson(p.name, row));
+        row.appendChild(rm);
+      }
       presenceListEl.appendChild(row);
     }
     const hint = document.createElement('p');
     hint.className = 'presence-hint';
     hint.textContent = 'Online = com a conversa aberta na tela. Ausente = conversa aberta, mas sem mexer há alguns minutos. App em segundo plano ou tela bloqueada não conta como online.';
     presenceListEl.appendChild(hint);
+  }
+
+  async function forgetPresencePerson(name, row) {
+    row.classList.add('is-leaving');
+    try {
+      const r = await fetch(api('/api/presence/forget'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      });
+      const d = await r.json().catch(() => null);
+      if (d && d.presence) applyPresence(d.presence);
+      if (r.status === 409) toast(`${name} está aqui agora, não dá pra tirar.`);
+      else if (!r.ok) throw new Error('falhou');
+      else renderPresencePanel();
+    } catch (e) {
+      row.classList.remove('is-leaving');
+      toast('Não consegui tirar da lista agora.');
+    }
   }
 
   function closePresencePanel() {
@@ -7051,7 +7118,7 @@
     }
     const w = maxX - minX;
     const h = maxY - minY;
-    if (w < 70 || h < 70) return false;
+    if (w < 55 || h < 55) return false;
     const ratio = w / h;
     if (ratio < 0.55 || ratio > 2.2) return false;
     const first = points[0];
@@ -7075,12 +7142,78 @@
   }
 
   // ---- capturar o traço por cima da conversa ----
-  const heartTrack = { pts: [], t0: 0, active: false };
+  // v56 (o Teo não conseguia):
+  //  - coração em DOIS traços (metade esquerda, levanta o dedo, metade
+  //    direita) agora vale: um traço que não passou fica guardado ~1,2s e
+  //    é testado junto com o próximo, nas quatro combinações de sentido;
+  //  - no Safari do Mac, arrastar com o mouse por cima de uma foto vira o
+  //    "arrastar imagem" do navegador e os eventos de ponteiro param no
+  //    meio - o traço continua pelos eventos de arrastar (dragover/dragend);
+  //  - coração um pouco menor também vale (55px em vez de 70px);
+  //  - enquanto a pessoa desenha aparece um rastro rosa, só depois que o
+  //    traço já fez curva de verdade (rolar a conversa não mostra nada).
+  const heartTrack = { pts: [], t0: 0, active: false, turn: 0, inking: false };
+  let heartPending = null; // { pts, t0, tEnd }
+  const HEART_JOIN_MS = 1200;
+
+  const heartInk = document.createElement('canvas');
+  heartInk.className = 'heart-ink hidden';
+  heartInk.setAttribute('aria-hidden', 'true');
+  document.body.appendChild(heartInk);
+  let heartInkCtx = null;
+  let heartInkFade = null;
+
+  function heartInkStart() {
+    clearTimeout(heartInkFade);
+    const dpr = Math.min(window.devicePixelRatio || 1, 3);
+    heartInk.width = Math.round(window.innerWidth * dpr);
+    heartInk.height = Math.round(window.innerHeight * dpr);
+    heartInk.classList.remove('hidden', 'is-fading', 'is-done');
+    heartInkCtx = heartInk.getContext('2d');
+    if (!heartInkCtx) return;
+    heartInkCtx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    heartInkCtx.clearRect(0, 0, window.innerWidth, window.innerHeight);
+    heartInkCtx.lineCap = 'round';
+    heartInkCtx.lineJoin = 'round';
+    heartInkCtx.lineWidth = 5;
+    heartInkCtx.strokeStyle = 'rgba(255, 134, 176, 0.9)';
+    heartInkCtx.shadowColor = 'rgba(255, 92, 150, 0.85)';
+    heartInkCtx.shadowBlur = 12;
+    // Traço da tentativa anterior (coração em dois traços) continua visível.
+    if (heartPending) heartInkPath(heartPending.pts, 0);
+  }
+  function heartInkPath(pts, from) {
+    if (!heartInkCtx || pts.length < 2) return;
+    heartInkCtx.beginPath();
+    const a = pts[Math.max(0, from - 1)];
+    heartInkCtx.moveTo(a.x, a.y);
+    for (let i = Math.max(1, from); i < pts.length; i++) heartInkCtx.lineTo(pts[i].x, pts[i].y);
+    heartInkCtx.stroke();
+  }
+  function heartInkEnd(ok) {
+    if (heartInk.classList.contains('hidden')) return;
+    clearTimeout(heartInkFade);
+    heartInk.classList.add(ok ? 'is-done' : 'is-fading');
+    heartInkFade = setTimeout(() => {
+      heartInk.classList.add('hidden');
+      heartInk.classList.remove('is-fading', 'is-done');
+      if (heartInkCtx) heartInkCtx.clearRect(0, 0, window.innerWidth, window.innerHeight);
+    }, ok ? 450 : 700);
+  }
+
   function heartStart(x, y) {
     if (!heartEnabled) return;
+    if (heartPending && performance.now() - heartPending.tEnd > HEART_JOIN_MS) heartPending = null;
     heartTrack.pts = [{ x, y }];
     heartTrack.t0 = performance.now();
+    heartTrack.tLast = heartTrack.t0;
     heartTrack.active = true;
+    heartTrack.turn = 0;
+    heartTrack.inking = false;
+    if (heartPending) {
+      heartTrack.inking = true;
+      heartInkStart();
+    }
   }
   function heartMove(x, y) {
     if (!heartTrack.active) return;
@@ -7088,34 +7221,107 @@
     const l = p[p.length - 1];
     if (Math.abs(x - l.x) + Math.abs(y - l.y) < 3) return;
     p.push({ x, y });
-    if (p.length > 800) heartTrack.active = false;
+    heartTrack.tLast = performance.now();
+    if (p.length > 800) { heartTrack.active = false; heartInkEnd(false); return; }
+    // Quanto o traço já virou (curvas suaves; ida-e-volta seca não conta).
+    if (p.length >= 3) {
+      const b = p[p.length - 2];
+      const c = p[p.length - 3];
+      let d = Math.atan2(y - b.y, x - b.x) - Math.atan2(b.y - c.y, b.x - c.x);
+      while (d > Math.PI) d -= 2 * Math.PI;
+      while (d < -Math.PI) d += 2 * Math.PI;
+      if (Math.abs(d) < 2.4) heartTrack.turn += Math.abs(d);
+    }
+    if (!heartTrack.inking && heartTrack.turn > 3.4) {
+      heartTrack.inking = true;
+      heartInkStart();
+      heartInkPath(p, 0);
+    } else if (heartTrack.inking) {
+      heartInkPath(p, p.length - 1);
+    }
+  }
+  function heartTry(pts, t0, tEnd) {
+    const dt = tEnd - t0;
+    if (dt < 250 || dt > 9000) return false;
+    return looksLikeHeart(pts);
   }
   function heartEnd() {
     if (!heartTrack.active) return;
     heartTrack.active = false;
-    const dt = performance.now() - heartTrack.t0;
-    if (dt < 250 || dt > 6000) return;
-    if (looksLikeHeart(heartTrack.pts)) playHeartFx();
+    const pts = heartTrack.pts;
+    // Fim = último movimento (o "soltou" pode ter chegado atrasado).
+    const now = heartTrack.tLast || performance.now();
+    let ok = pts.length >= 12 && now - heartTrack.t0 <= 6000 && heartTry(pts, heartTrack.t0, now);
+    if (!ok && heartPending && heartTrack.t0 - heartPending.tEnd <= HEART_JOIN_MS && pts.length >= 6) {
+      const a = heartPending.pts;
+      const ra = a.slice().reverse();
+      const rb = pts.slice().reverse();
+      ok = [a.concat(pts), a.concat(rb), ra.concat(pts), ra.concat(rb)]
+        .some((combo) => heartTry(combo, heartPending.t0, now));
+    }
+    if (ok) {
+      heartPending = null;
+      heartInkEnd(true);
+      playHeartFx();
+      return;
+    }
+    // Pode ser a primeira metade de um coração em dois traços.
+    // Só guarda traço que fez curva (meio coração vira bem mais que isso);
+    // rolar a conversa não fica pendurado esperando o próximo.
+    heartPending = pts.length >= 6 && heartTrack.turn > 2.5 ? { pts, t0: heartTrack.t0, tEnd: now } : null;
+    heartInkEnd(false);
   }
+  // Começar em cima de um vídeo: os controles do player às vezes engolem o
+  // "encostou" (touchstart) - aí o traço começa no primeiro movimento do
+  // dedo. E se o "soltou" do mouse se perder, o primeiro movimento sem
+  // botão apertado fecha o traço.
+  let heartTouchSeen = false;
   messagesEl.addEventListener('touchstart', (e) => {
-    if (e.touches.length !== 1) { heartTrack.active = false; return; }
+    heartTouchSeen = true;
+    if (e.touches.length !== 1) { heartTrack.active = false; heartInkEnd(false); return; }
     heartStart(e.touches[0].clientX, e.touches[0].clientY);
   }, { passive: true });
   messagesEl.addEventListener('touchmove', (e) => {
-    if (e.touches.length !== 1) { heartTrack.active = false; return; }
+    if (e.touches.length !== 1) { heartTrack.active = false; heartInkEnd(false); return; }
+    if (!heartTrack.active && !heartTouchSeen) {
+      heartTouchSeen = true;
+      heartStart(e.touches[0].clientX, e.touches[0].clientY);
+      return;
+    }
     heartMove(e.touches[0].clientX, e.touches[0].clientY);
   }, { passive: true });
-  messagesEl.addEventListener('touchend', heartEnd, { passive: true });
-  messagesEl.addEventListener('touchcancel', heartEnd, { passive: true });
+  const heartTouchEnd = (e) => {
+    if (!e.touches || !e.touches.length) heartTouchSeen = false;
+    heartEnd();
+  };
+  messagesEl.addEventListener('touchend', heartTouchEnd, { passive: true });
+  messagesEl.addEventListener('touchcancel', heartTouchEnd, { passive: true });
+  let heartMouseDown = false;
   messagesEl.addEventListener('pointerdown', (e) => {
-    if (e.pointerType === 'mouse' && e.button === 0) heartStart(e.clientX, e.clientY);
+    if (e.pointerType === 'mouse' && e.button === 0) { heartMouseDown = true; heartStart(e.clientX, e.clientY); }
   });
   window.addEventListener('pointermove', (e) => {
-    if (e.pointerType === 'mouse' && (e.buttons & 1)) heartMove(e.clientX, e.clientY);
+    if (e.pointerType !== 'mouse') return;
+    if (e.buttons & 1) {
+      heartMove(e.clientX, e.clientY);
+    } else if (heartMouseDown) {
+      heartMouseDown = false;
+      heartEnd();
+    }
   });
   window.addEventListener('pointerup', (e) => {
-    if (e.pointerType === 'mouse') heartEnd();
+    if (e.pointerType !== 'mouse') return;
+    heartMouseDown = false;
+    heartEnd();
   });
+  // Safari/Chrome no computador: arrastou por cima de uma foto e o navegador
+  // começou a "arrastar a imagem" - os eventos de ponteiro param, os de
+  // arrastar continuam (dragover traz a posição em todos os navegadores).
+  document.addEventListener('dragover', (e) => {
+    if (heartTrack.active && (e.clientX || e.clientY)) heartMove(e.clientX, e.clientY);
+  });
+  document.addEventListener('dragend', () => { if (heartTrack.active) heartEnd(); });
+  document.addEventListener('drop', () => { if (heartTrack.active) heartEnd(); });
 
   // ---- editor: enquadrar a foto dentro do coração ----
   // Estado em pixels do palco: o centro da imagem fica deslocado (ox, oy)

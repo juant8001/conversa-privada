@@ -10,7 +10,7 @@ const zlib = require('zlib');
 const express = require('express');
 const multer = require('multer');
 const archiver = require('archiver');
-const { Presence } = require('./lib/presence');
+const { Presence, nameKey: presenceKey } = require('./lib/presence');
 const { loadChangelog } = require('./lib/changelog');
 const { EventEmitter } = require('events');
 
@@ -159,10 +159,33 @@ const pendingExpiry = new Map();
 // alguém sai do online, pra sobreviver a um restart.
 const PRESENCE_STALE_MS = parseInt(process.env.PRESENCE_STALE_MS || '50000', 10);
 let presenceLoaded = false;
+// v56: só entra no "visto por último" quem já mandou mensagem ou reagiu
+// (ver isKnown em lib/presence.js) - nome digitado pela metade ou errado não
+// vira mais pessoa offline na lista. Montado ao carregar o store e
+// atualizado a cada mensagem nova.
+const knownNames = new Set();
+function noteKnownName(n) {
+  const k = presenceKey(n);
+  if (k && k !== 'sistema') knownNames.add(k);
+}
+function rebuildKnownNames(data) {
+  knownNames.clear();
+  // Guardado junto do visto por último, pra "Limpar conversa" não fazer
+  // ninguém sumir da lista depois de um restart.
+  for (const k of (data && data.presence && data.presence.known) || []) noteKnownName(k);
+  for (const m of (data && data.messages) || []) {
+    if (m.type === 'system') continue;
+    noteKnownName(m.sender);
+    for (const r of m.reactions || []) noteKnownName(r.sender);
+  }
+}
+bus.on('message', (m) => { if (m && m.type !== 'system') noteKnownName(m.sender); });
+bus.on('message-reacted', (p) => { for (const r of (p && p.reactions) || []) noteKnownName(r.sender); });
 const presence = new Presence({
   staleMs: PRESENCE_STALE_MS,
   onChange: (snap) => bus.emit('presence', snap),
   onWentOffline: (key) => persistLastSeen(key),
+  isKnown: (k) => knownNames.has(k),
 });
 setInterval(() => presence.sweep(), Math.min(5000, PRESENCE_STALE_MS)).unref();
 
@@ -170,7 +193,7 @@ setInterval(() => presence.sweep(), Math.min(5000, PRESENCE_STALE_MS)).unref();
 function persistLastSeen(key) {
   try {
     const data = loadStoreByKey(key);
-    data.presence = { lastSeen: presence.lastSeenObject() };
+    data.presence = { lastSeen: presence.lastSeenObject(), known: [...knownNames].slice(0, 200) };
     store.persist(key, data);
   } catch (e) {
     console.error('Falha ao guardar o visto por último', e.message);
@@ -182,7 +205,12 @@ function ensurePresenceLoaded(key) {
   presenceLoaded = true;
   try {
     const data = loadStoreByKey(key);
+    rebuildKnownNames(data);
     presence.loadLastSeen(data.presence && data.presence.lastSeen);
+    // Nomes fantasmas gravados antes da v56: some da lista e do arquivo.
+    const raw = (data.presence && data.presence.lastSeen) || {};
+    const kept = presence.lastSeenObject();
+    if (Object.keys(raw).length !== Object.keys(kept).length) persistLastSeen(key);
   } catch (e) {
     // sem visto por último guardado: tudo bem
   }
@@ -831,8 +859,8 @@ function parseDimension(v) {
 
 const REPLY_SNIPPET_LABELS = {
   image: '📷 Foto',
-  video: '🎥 Video',
-  audio: '🎤 Audio',
+  video: '🎥 Vídeo',
+  audio: '🎤 Áudio',
   file: '📄 Arquivo',
   sticker: 'Figurinha',
 };
@@ -2767,6 +2795,19 @@ roomRouter.post('/api/presence', requireAuth, express.json({ type: ['application
   if (!PRESENCE_CID_RE.test(String(cid || ''))) return res.status(400).json({ error: 'invalid' });
   ensurePresenceLoaded(req.session.key);
   presence.beat(String(cid), { name, state, device, key: req.session.key });
+  res.json({ ok: true, presence: presence.current });
+});
+
+// "Tirar da lista" no painel de quem está aqui (v56): apaga o visto por
+// último de um nome que não está conectado agora.
+roomRouter.post('/api/presence/forget', requireAuth, express.json(), (req, res) => {
+  const name = String((req.body && req.body.name) || '').trim().slice(0, 60);
+  if (!name) return res.status(400).json({ error: 'invalid' });
+  ensurePresenceLoaded(req.session.key);
+  if (!presence.forget(name)) {
+    return res.status(409).json({ error: 'online', presence: presence.current });
+  }
+  persistLastSeen(req.session.key);
   res.json({ ok: true, presence: presence.current });
 });
 

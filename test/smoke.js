@@ -672,6 +672,26 @@ async function main() {
     check('aba que parou de bater cai sozinha (visto por último)', pTeo && pTeo.state === 'offline' && typeof pTeo.lastSeen === 'number', pTeo);
     check('quem bate continua online', r.json.presence.online.includes('Juan'));
 
+    console.log('\n# v56: nomes fantasmas na presença');
+    for (const n of ['J', 'Ju', 'Jua', 'Juam']) {
+      await juan('POST', '/api/presence', { cid: 'juan-tab-0002', name: n, state: 'active' });
+    }
+    r = await juan('POST', '/api/presence', { cid: 'juan-tab-0002', name: 'Juan', state: 'active' });
+    const ghostNames = r.json.presence.people.map((x) => x.name.toLowerCase());
+    check('nome digitado pela metade não vira pessoa', !['j', 'ju', 'jua', 'juam'].some((g) => ghostNames.includes(g)), ghostNames);
+    r = await juan('POST', '/api/presence', { cid: 'juan-tab-0003', name: 'Fulano Errado', state: 'active' });
+    check('quem está conectado aparece mesmo sem ter mandado mensagem', r.json.presence.online.includes('Fulano Errado'));
+    r = await juan('POST', '/api/presence', { cid: 'juan-tab-0003', name: 'Fulano Errado', state: 'hidden' });
+    await new Promise((res) => setTimeout(res, 3300));
+    r = await juan('POST', '/api/presence', { cid: 'juan-tab-0001', name: 'Juan', state: 'active' });
+    check('...e não fica como "visto por último" depois que sai', !r.json.presence.people.some((x) => x.name === 'Fulano Errado'), r.json.presence.people.map((x) => x.name));
+    r = await juan('POST', '/api/presence/forget', { name: 'Juan' });
+    check('não dá pra tirar da lista quem está aqui', r.res.status === 409);
+    r = await juan('POST', '/api/presence/forget', { name: 'teo' });
+    check('tirar da lista quem saiu', r.res.status === 200 && !r.json.presence.people.some((x) => x.name === 'Teo'), r.json && r.json.presence);
+    r = await juan('POST', '/api/presence/forget', {});
+    check('tirar da lista sem nome = 400', r.res.status === 400);
+
     console.log('\n# v54: visualização única de vídeo');
     const FAKE_MP4 = Buffer.concat([Buffer.from([0, 0, 0, 0x18]), Buffer.from('ftypmp42'), crypto.randomBytes(64)]);
     r = await juan('POST', '/api/media', form({ sender: 'Juan', ephemeral: '1', duration: '120.4', file: { buffer: FAKE_MP4, type: 'video/mp4', name: 'v.mp4' } }));

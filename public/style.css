@@ -3147,3 +3147,81 @@ body::before {
 .pc-sheet > .pc-sheet-legend,
 .pc-sheet > .confirm-actions { flex: none; }
 .pc-sheet > .pc-sheet-list { flex: 0 1 auto; }
+
+/* ---- v56: menu de vídeo/áudio (Responder, Reagir...) ---- */
+.media-menu-btn {
+  position: absolute;
+  z-index: 2;
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  cursor: pointer;
+  color: #fff;
+  background: rgba(10, 10, 14, 0.5);
+  -webkit-backdrop-filter: blur(8px);
+  backdrop-filter: blur(8px);
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35);
+  transition: background 0.15s ease, transform 0.15s ease;
+  -webkit-tap-highlight-color: transparent;
+}
+/* No vídeo fica no meio da borda direita: os cantos de cima são do player
+   do iPhone (tela cheia/PiP e volume), embaixo fica a barra, e o centro é
+   o play. */
+.media-menu-btn.on-video { top: 50%; right: 8px; transform: translateY(-50%); transition: background 0.15s ease, opacity 0.15s ease; }
+.media-menu-btn:active { background: rgba(10, 10, 14, 0.7); }
+.bubble:has(> .media-menu-btn.on-audio) { position: relative; }
+.media-menu-btn.on-audio {
+  left: 8px;
+  bottom: 3px;
+  width: 24px;
+  height: 24px;
+  background: rgba(255, 255, 255, 0.08);
+  box-shadow: none;
+  color: var(--muted);
+}
+.media-menu-btn.on-audio svg { width: 13px; height: 13px; }
+@media (hover: hover) {
+  .media-menu-btn.on-video { opacity: 0; }
+  .bubble:hover .media-menu-btn.on-video,
+  .media-menu-btn.on-video:focus-visible { opacity: 1; }
+}
+
+/* ---- v56: tirar alguém da lista de quem está aqui ---- */
+.presence-person { align-items: flex-start; transition: opacity 0.2s ease; }
+.presence-person.is-leaving { opacity: 0.35; pointer-events: none; }
+.presence-forget {
+  flex-shrink: 0;
+  align-self: center;
+  width: 32px;
+  height: 32px;
+  border: 0;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  cursor: pointer;
+  color: var(--muted);
+  background: transparent;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+.presence-forget:hover, .presence-forget:active { color: var(--danger); background: rgba(224, 104, 90, 0.12); }
+
+/* ---- v56: rastro do coração enquanto desenha ---- */
+.heart-ink {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  pointer-events: none;
+  z-index: 69;
+  opacity: 1;
+  transition: opacity 0.6s ease;
+}
+.heart-ink.is-fading { opacity: 0; }
+.heart-ink.is-done { opacity: 0; transition-duration: 0.4s; }
