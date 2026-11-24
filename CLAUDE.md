@@ -446,3 +446,42 @@ flag.
 - `scripts/cofre-zip-original.js <out.zip>` recovers the original zip.
 - `/api/media` keeps the last big (>8 MB) decrypted file for 2 min so
   Safari's Range requests don't decrypt a huge video over and over.
+
+## v54 (edição, presença, backup, changelog)
+
+- **Editar mensagem**: `POST /api/messages/:id/edit {requesterName, text}` — só
+  texto, só quem mandou. A versão anterior vai pra `msg.edits` (`[{text, ts}]`,
+  teto de 30, a original fica sempre); `msg.editedAt`. SSE `message-edited`.
+  Cliente: "Editar" no `#msg-menu` reaproveita a `#reply-bar` (classe
+  `is-editing`, variável `editingMsg`); a bolha ganha `.edited-tag` dentro da
+  `.msg-time` (`.msg-row.is-edited` alarga o vão) e tocar abre
+  `#edit-history-overlay` com diff por palavra (`diffTokens`).
+- **Presença** (`lib/presence.js`): online = aba visível e com interação
+  recente. Cada aba tem um `PRESENCE_CID`, manda `state` active/idle/hidden em
+  `POST /api/presence` (a cada 20s na tela, na hora quando muda, e
+  `sendBeacon` hidden no `pagehide`) e no `?cid=&state=&device=` do SSE. Aba
+  que não bate há `PRESENCE_STALE_MS` (50s) cai, mesmo com SSE "fantasma"
+  aberto pelo túnel. Payload `{online, people: [{name, state
+  online|away|offline, lastSeen, devices}]}`; o visto por último é gravado em
+  `data.presence` quando alguém sai do online. Header: `#presence-btn`
+  (nome + status) abre `#presence-overlay`.
+- **Visualização única de vídeo**: janela = duração×1.5+60s (cliente manda
+  `duration` no upload; sem duração, `EPHEMERAL_VIDEO_FALLBACK_MS` = 30min) e
+  `POST /api/messages/:id/view-done` encerra quando o vídeo acaba/fecha.
+  `msg.viewWindowMs` é o que o `reconcileEphemeral` usa.
+- **Backup**: `/api/export` é assíncrono, um arquivo por vez, mídia sem
+  recompressão; `?only=text`, `?part=N` (partes de `EXPORT_PART_MB`, padrão
+  1024) e `GET /api/export/plan`. Painel `#backup-overlay`.
+- **Changelog no chat**: `lib/changelog.js` (entrada nova NO TOPO a cada
+  versão). `announceChangelog` no `loadWithSessionKey` cria mensagens
+  `type: 'system'` (cartão `.system-card`, sem menu) e grava
+  `data.changelogVersion`. Store novo só marca a versão. Testes:
+  `CHANGELOG_JSON`. Nunca no portal do Hermes.
+- **Cofre**: `POST /api/vault/upload` (dono, cofre aberto) → `vault.addUpload`.
+- **Foto do coração** (só do dono, fora do changelog de propósito):
+  `data.heartPhoto` + rotas `/api/heart-photo*` (todas com `vaultOwnerGate`;
+  salvar/tirar exigem cofre aberto). `heart` no boot só vai pro dono. O
+  cliente (`looksLikeHeart`, `playHeartFx`, `openHeartEditor`) só reconhece o
+  gesto quando `heartEnabled`.
+- Classes das folhas novas são `pc-sheet*` (já existe `.sheet-card` /
+  `.sheet-title` na folha de emojis).

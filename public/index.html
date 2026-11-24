@@ -53,8 +53,13 @@
 
 <div id="chat-screen" class="screen hidden">
   <header class="chat-header">
-    <span class="dot"></span>
-    <span class="title">conversa<span id="typing-indicator" class="typing-indicator hidden" aria-live="polite"></span></span>
+    <button type="button" id="presence-btn" class="presence-btn" title="Quem está aqui" aria-label="Quem está aqui">
+      <span class="dot offline"></span>
+      <span class="presence-texts">
+        <span class="title">conversa<span id="typing-indicator" class="typing-indicator hidden" aria-live="polite"></span></span>
+        <span id="presence-text" class="presence-text">conectando…</span>
+      </span>
+    </button>
     <div class="header-actions">
       <button id="fav-btn" class="icon-btn" title="Mensagens favoritas" aria-label="Mensagens favoritas">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3.8l2.5 5.2 5.7.8-4.1 4 1 5.7L12 16.8l-5.1 2.7 1-5.7-4.1-4 5.7-.8L12 3.8Z"/></svg>
@@ -283,6 +288,8 @@
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M14.5 5.5 8 12l6.5 6.5"/></svg>
     </button>
     <span class="title">Cofre</span>
+    <button type="button" id="vault-add" class="wa-select-all hidden">Adicionar</button>
+    <input id="vault-add-input" type="file" accept="image/*,video/*" multiple class="hidden" />
     <button type="button" id="vault-select" class="wa-select-all hidden">Selecionar</button>
     <button type="button" id="vault-lock" class="wa-select-all hidden">Trancar</button>
   </header>
@@ -315,6 +322,7 @@
     <div id="vault-preview-media" class="vault-preview-media"></div>
     <div class="vault-preview-actions">
       <button type="button" id="vault-preview-close" class="wa-link-btn">Fechar</button>
+      <button type="button" id="vault-preview-heart" class="wa-link-btn hidden">Usar no coração</button>
       <button type="button" id="vault-preview-send" class="wa-import">Mandar na conversa</button>
     </div>
   </div>
@@ -362,6 +370,71 @@
   </div>
 </div>
 
+
+<!-- Quem está aqui (v54): aberto tocando no nome da conversa. -->
+<div id="presence-overlay" class="confirm-overlay hidden">
+  <div class="confirm-card pc-sheet">
+    <p class="pc-sheet-title">Quem está aqui</p>
+    <div id="presence-list" class="pc-sheet-list"></div>
+    <div class="confirm-actions">
+      <button id="presence-close" class="confirm-btn confirm-cancel">Fechar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Histórico de uma mensagem editada (v54). -->
+<div id="edit-history-overlay" class="confirm-overlay hidden">
+  <div class="confirm-card pc-sheet">
+    <p class="pc-sheet-title">Histórico de edição</p>
+    <p class="pc-sheet-legend"><del class="diff-del">riscado</del> saiu · <ins class="diff-add">verde</ins> entrou</p>
+    <div id="edit-history-list" class="pc-sheet-list"></div>
+    <div class="confirm-actions">
+      <button id="edit-history-close" class="confirm-btn confirm-cancel">Fechar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Backup (v54): só as mensagens, em partes ou completo. -->
+<div id="backup-overlay" class="confirm-overlay hidden">
+  <div class="confirm-card pc-sheet">
+    <p class="pc-sheet-title">Backup da conversa</p>
+    <div id="backup-body" class="pc-sheet-list"></div>
+    <div class="confirm-actions">
+      <button id="backup-close" class="confirm-btn confirm-cancel">Fechar</button>
+    </div>
+  </div>
+</div>
+
+<!-- Editor da foto do coração (só do dono do cofre). -->
+<div id="heart-editor" class="heart-editor hidden" role="dialog" aria-label="Foto do coração">
+  <div class="heart-editor-card">
+    <p class="heart-editor-title">Foto do coração</p>
+    <p class="heart-editor-hint">Arraste pra posicionar e use o zoom (ou pinça com dois dedos).</p>
+    <div id="heart-stage" class="heart-stage">
+      <img id="heart-stage-img" class="heart-stage-img" alt="" draggable="false" />
+      <svg class="heart-stage-mask" viewBox="0 0 100 90" preserveAspectRatio="none" aria-hidden="true">
+        <path class="heart-mask-shade" fill-rule="evenodd" d="M-2 -2 H102 V92 H-2 Z M50 86 C 22 66 3 50 3 29 C 3 14 14 3 28 3 C 38 3 46 9 50 18 C 54 9 62 3 72 3 C 86 3 97 14 97 29 C 97 50 78 66 50 86 Z"/>
+        <path class="heart-mask-line" d="M50 86 C 22 66 3 50 3 29 C 3 14 14 3 28 3 C 38 3 46 9 50 18 C 54 9 62 3 72 3 C 86 3 97 14 97 29 C 97 50 78 66 50 86 Z"/>
+      </svg>
+    </div>
+    <div class="heart-zoom-row">
+      <span aria-hidden="true">−</span>
+      <input id="heart-zoom" type="range" min="1" max="5" step="0.01" value="1" aria-label="Zoom" />
+      <span aria-hidden="true">+</span>
+    </div>
+    <div class="heart-editor-actions">
+      <button type="button" id="heart-center" class="wa-link-btn">Centralizar</button>
+      <button type="button" id="heart-test" class="wa-link-btn">Ver animação</button>
+      <button type="button" id="heart-remove" class="wa-link-btn is-danger hidden">Tirar do coração</button>
+    </div>
+    <div class="confirm-actions">
+      <button id="heart-cancel" class="confirm-btn confirm-cancel">Cancelar</button>
+      <button id="heart-save" class="confirm-btn heart-save-btn">Salvar</button>
+    </div>
+  </div>
+</div>
+<div id="heart-fx" class="heart-fx hidden" aria-hidden="true"></div>
+
 <!-- Menu de contexto. Abre com clique direito no desktop ou toque longo
      (~480ms) - igual aos apps de mensagem de verdade, que não deixam botão
      fixo no balão. O backdrop é transparente e cobre a tela só pra capturar o
@@ -387,6 +460,10 @@
   <button type="button" id="msg-menu-reply" class="msg-menu-item" role="menuitem">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6 4 11l5 5"/><path d="M4 11h9a6 6 0 0 1 6 6v1.5"/></svg>
     <span>Responder</span>
+  </button>
+  <button type="button" id="msg-menu-edit" class="msg-menu-item hidden" role="menuitem">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h4L19 9a2.8 2.8 0 0 0-4-4L4 16v4Z"/><path d="m13.5 6.5 4 4"/></svg>
+    <span>Editar</span>
   </button>
   <button type="button" id="msg-menu-copy" class="msg-menu-item" role="menuitem">
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M6 15H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v1"/></svg>
@@ -459,7 +536,7 @@
 <div id="emoji-sheet" class="sheet-overlay hidden">
   <div class="sheet-card" role="dialog" aria-modal="true" aria-labelledby="emoji-sheet-title">
     <div class="sheet-head">
-      <span id="emoji-sheet-title" class="sheet-title">Reagir</span>
+      <span id="emoji-sheet-title" class="pc-sheet-title">Reagir</span>
       <button type="button" id="emoji-sheet-edit" class="sheet-link">Editar atalhos</button>
       <button type="button" id="emoji-sheet-close" class="icon-btn sheet-close" title="Fechar" aria-label="Fechar">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6 6 18"/></svg>

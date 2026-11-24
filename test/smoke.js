@@ -373,6 +373,11 @@ async function main() {
   const waDir = canWa ? makeFakeWhatsApp(fakeOrigin) : null;
   const teoPhone = path.join(DATA_DIR, '..', `pc-teo-${PORT}.json`);
   writeTeoPhone(teoPhone);
+  const changelogFile = path.join(DATA_DIR, '..', `pc-changelog-${PORT}.json`);
+  const writeChangelog = (versions) => fs.writeFileSync(changelogFile, JSON.stringify(versions.map((v) => ({
+    version: v, date: '2026-11-24', title: `Novidades ${v}`, items: [`item de ${v}`],
+  }))));
+  writeChangelog(['t1']);
   const env = {
     ...process.env,
     PORT: String(PORT),
@@ -395,6 +400,9 @@ async function main() {
     VAULT_OWNER: 'Juan',
     WHATSAPP_BAILEYS_MODULE: path.join(__dirname, 'fake-baileys.mjs'),
     WHATSAPP_FAKE_DATA: teoPhone,
+    PRESENCE_STALE_MS: '1500',
+    EXPORT_PART_MB: '0.00005', // ~50 bytes: cada mídia vira uma parte
+    CHANGELOG_JSON: changelogFile,
   };
   const server = spawn(process.execPath, [path.join(__dirname, '..', 'server.js')], { env, stdio: ['ignore', 'pipe', 'pipe'] });
   let serverErr = '';
@@ -453,6 +461,7 @@ async function main() {
     check('segundo login com o código certo', r.res.status === 200);
     r = await juan('GET', '/api/messages');
     check('API responde no-store', r.res.headers.get('cache-control') === 'no-store');
+    check('conversa nova não ganha cartão de changelog', r.json.messages.length === 0);
 
     console.log('\n# boot / preferências');
     r = await juan('GET', '/api/boot?name=Juan');
@@ -624,6 +633,118 @@ async function main() {
     await new Promise((res) => setTimeout(res, 600));
     r = await teo('GET', `/api/media/${ephMediaId}`, undefined, { raw: true });
     check('efêmera some depois do prazo', r.res.status === 404);
+
+    console.log('\n# v54: editar mensagem');
+    r = await juan('POST', '/api/messages', { sender: 'Juan', text: 'oi tudo bem' });
+    const ed = r.json.message;
+    r = await teo('POST', `/api/messages/${ed.id}/edit`, { requesterName: 'Teo', text: 'hackeado' });
+    check('só quem mandou edita', r.res.status === 403);
+    r = await juan('POST', `/api/messages/${ed.id}/edit`, { requesterName: 'juan', text: '   ' });
+    check('edição vazia = 400', r.res.status === 400);
+    r = await juan('POST', `/api/messages/${ed.id}/edit`, { requesterName: 'juan', text: 'oi, tudo bem? https://example.invalid/x' });
+    check('edita (nome sem diferenciar maiúsculas)', r.res.status === 200 && r.json.message.text.startsWith('oi, tudo bem?') && !!r.json.message.editedAt);
+    check('versão anterior guardada', r.json.message.edits.length === 1 && r.json.message.edits[0].text === 'oi tudo bem' && r.json.message.edits[0].ts === ed.ts);
+    r = await juan('POST', `/api/messages/${ed.id}/edit`, { requesterName: 'Juan', text: 'oi, tudo bem? https://example.invalid/x' });
+    check('mesmo texto não cria versão nova', r.json.message.edits.length === 1);
+    r = await juan('POST', `/api/messages/${ed.id}/edit`, { requesterName: 'Juan', text: 'oi, tudo bem com você?' });
+    r = await teo('GET', '/api/messages');
+    const edSeen = r.json.messages.find((x) => x.id === ed.id);
+    check('o outro vê a edição e o histórico', edSeen.text === 'oi, tudo bem com você?' && edSeen.edits.length === 2);
+    r = await juan('POST', `/api/messages/${photo.id}/edit`, { requesterName: 'Juan', text: 'x' });
+    check('mídia não edita', r.res.status === 400 || r.res.status === 410);
+
+    console.log('\n# v54: presença');
+    r = await teo('POST', '/api/presence', { cid: 'x', name: 'Teo', state: 'active' });
+    check('cid inválido = 400', r.res.status === 400);
+    r = await teo('POST', '/api/presence', { cid: 'teo-tab-0001', name: 'Teo', state: 'active', device: 'iPhone' });
+    let pTeo = r.json.presence.people.find((x) => x.name === 'Teo');
+    check('aba na tela = online', r.res.status === 200 && r.json.presence.online.includes('Teo') && pTeo.devices[0].device === 'iPhone');
+    r = await juan('POST', '/api/presence', { cid: 'juan-tab-0001', name: 'Juan', state: 'hidden', device: 'Mac' });
+    let pJuan = r.json.presence.people.find((x) => x.name === 'Juan');
+    check('aba em segundo plano não conta como online', pJuan.state === 'offline' && !r.json.presence.online.includes('Juan'));
+    r = await teo('POST', '/api/presence', { cid: 'teo-tab-0001', name: 'Teo', state: 'idle' });
+    pTeo = r.json.presence.people.find((x) => x.name === 'Teo');
+    check('parada na tela = ausente, com horário', pTeo.state === 'away' && typeof pTeo.lastSeen === 'number');
+    r = await teo('POST', '/api/presence', { cid: 'teo-tab-0001', name: 'Teo', state: 'active' });
+    await new Promise((res) => setTimeout(res, 3300));
+    r = await juan('POST', '/api/presence', { cid: 'juan-tab-0001', name: 'Juan', state: 'active' });
+    pTeo = r.json.presence.people.find((x) => x.name === 'Teo');
+    check('aba que parou de bater cai sozinha (visto por último)', pTeo && pTeo.state === 'offline' && typeof pTeo.lastSeen === 'number', pTeo);
+    check('quem bate continua online', r.json.presence.online.includes('Juan'));
+
+    console.log('\n# v54: visualização única de vídeo');
+    const FAKE_MP4 = Buffer.concat([Buffer.from([0, 0, 0, 0x18]), Buffer.from('ftypmp42'), crypto.randomBytes(64)]);
+    r = await juan('POST', '/api/media', form({ sender: 'Juan', ephemeral: '1', duration: '120.4', file: { buffer: FAKE_MP4, type: 'video/mp4', name: 'v.mp4' } }));
+    const ephV = r.json.message;
+    check('duração não vaza antes de abrir', ephV.duration === undefined && !ephV.mediaId);
+    r = await teo('POST', `/api/messages/${ephV.id}/view`, { requesterName: 'Teo' });
+    const ephVMedia = r.json.message.mediaId;
+    check('vídeo: janela cobre o vídeo inteiro', r.json.closesOnEnd === true && r.json.remainingMs > 120000, r.json.remainingMs);
+    await new Promise((res) => setTimeout(res, 600));
+    r = await teo('GET', `/api/media/${ephVMedia}`, undefined, { raw: true, headers: { Range: 'bytes=0-9' } });
+    check('vídeo longo continua tocando depois dos segundos da foto', r.res.status === 206);
+    r = await juan('POST', `/api/messages/${ephV.id}/view-done`, { requesterName: 'Juan' });
+    check('quem mandou não encerra', r.res.status === 403);
+    r = await teo('POST', `/api/messages/${ephV.id}/view-done`, { requesterName: 'Teo' });
+    check('terminou de ver: encerra', r.res.status === 200);
+    r = await teo('GET', `/api/media/${ephVMedia}`, undefined, { raw: true });
+    check('vídeo some ao terminar', r.res.status === 404);
+    r = await juan('POST', '/api/media', form({ sender: 'Juan', ephemeral: '1', file: { buffer: FAKE_MP4, type: 'video/mp4', name: 'v2.mp4' } }));
+    r = await teo('POST', `/api/messages/${r.json.message.id}/view`, { requesterName: 'Teo' });
+    check('vídeo sem duração: teto longo (fecha pelo view-done)', r.json.remainingMs > 60000);
+
+    console.log('\n# v54: changelog no chat');
+    writeChangelog(['t2', 't1']);
+    r = await juan('GET', '/api/messages');
+    let sys = r.json.messages.filter((x) => x.type === 'system');
+    check('versão nova vira cartão na conversa', sys.length === 1 && sys[0].version === 't2' && sys[0].items[0] === 'item de t2');
+    r = await teo('GET', '/api/messages');
+    check('cartão aparece uma vez só', r.json.messages.filter((x) => x.type === 'system').length === 1);
+    writeChangelog(['t4', 't3', 't2', 't1']);
+    r = await teo('GET', '/api/boot?name=Teo');
+    r = await juan('GET', '/api/messages');
+    sys = r.json.messages.filter((x) => x.type === 'system').map((x) => x.version);
+    check('pulou versões: anuncia as que faltam, em ordem', JSON.stringify(sys) === JSON.stringify(['t2', 't3', 't4']), sys);
+
+    console.log('\n# v54: backup');
+    r = await juan('GET', '/api/export/plan');
+    const plan = r.json;
+    check('plano do backup', r.res.status === 200 && plan.files >= 1 && plan.parts.length === plan.files && plan.bytes > 0, plan);
+    const listZip = (buf) => {
+      const f = path.join(DATA_DIR, '..', `pc-zip-${PORT}.zip`);
+      fs.writeFileSync(f, buf);
+      try {
+        return execFileSync('unzip', ['-Z1', f]).toString().trim().split('\n');
+      } finally {
+        fs.rmSync(f, { force: true });
+      }
+    };
+    const readZip = (buf, name) => {
+      const f = path.join(DATA_DIR, '..', `pc-zip-${PORT}.zip`);
+      fs.writeFileSync(f, buf);
+      try {
+        return execFileSync('unzip', ['-p', f, name]).toString();
+      } finally {
+        fs.rmSync(f, { force: true });
+      }
+    };
+    r = await juan('GET', '/api/export?only=text', undefined, { raw: true });
+    check('só mensagens: zip na hora', r.res.status === 200 && r.buf.slice(0, 2).toString() === 'PK' && /so-mensagens/.test(r.res.headers.get('content-disposition')));
+    if (hasBin('unzip')) {
+      check('só mensagens: só o texto', JSON.stringify(listZip(r.buf).sort()) === JSON.stringify(['conversa.json', 'conversa.txt']));
+      const txt = readZip(r.buf, 'conversa.txt');
+      check('texto do backup marca a edição e guarda a versão anterior', txt.includes('(editada)') && txt.includes('versão anterior') && txt.includes('oi tudo bem'));
+      check('texto do backup traz o changelog', txt.includes('Atualização do sistema (t4)'));
+      r = await juan('GET', '/api/export?part=1', undefined, { raw: true });
+      const names = listZip(r.buf);
+      check('parte 1: conversa + 1 mídia', r.res.status === 200 && names.includes('conversa.txt') && names.filter((n) => !n.startsWith('conversa.')).length === 1, names);
+      r = await juan('GET', '/api/export', undefined, { raw: true });
+      const all = listZip(r.buf).filter((n) => !n.startsWith('conversa.'));
+      check('completo: todas as mídias', all.length === plan.files, { all: all.length, files: plan.files });
+      check('visualização única fora do backup', !all.some((n) => n.includes('v.mp4') || n.includes('v2.mp4')));
+    }
+    r = await juan('GET', '/api/export?part=999', undefined, { raw: true });
+    check('parte que não existe = 404', r.res.status === 404);
 
     console.log('\n# exportar e limpar');
     r = await juan('GET', '/api/export', undefined, { raw: true });
@@ -929,6 +1050,39 @@ async function main() {
         && last2[0].thumbId && last2[1].type === 'sticker', last2);
       r = await teo('GET', `/api/media/${last2[0].mediaId}`, undefined, { raw: true });
       check('o outro lado abre a foto mandada', r.res.status === 200 && r.buf.equals(PNG));
+      console.log('\n# v54: fotos novas no cofre e o coração');
+      r = await juan('POST', '/api/vault/upload', form({ name: 'Juan', files: { buffer: GIF, type: 'image/gif', name: 'nova.gif' } }));
+      check('manda foto pro cofre', r.res.status === 200 && r.json.added === 1, r.json);
+      r = await juan('POST', '/api/vault/upload', form({ name: 'Juan', files: { buffer: GIF, type: 'image/gif', name: 'outra.gif' } }));
+      check('a mesma foto de novo não duplica', r.json.duplicates === 1 && r.json.added === 0);
+      r = await juan('POST', '/api/vault/upload', form({ name: 'Juan', files: { buffer: Buffer.from('oi'), type: 'text/plain', name: 'a.txt' } }));
+      check('texto não entra no cofre', r.json.added === 0 && r.json.failed.length === 1);
+      r = await teo('POST', '/api/vault/upload', form({ name: 'Teo', files: { buffer: GIF, type: 'image/gif', name: 'x.gif' } }));
+      check('Teo não manda pro cofre', r.res.status === 404);
+      r = await teo('POST', '/api/heart-photo', form({ name: 'Teo', photo: { buffer: PNG, type: 'image/png', name: 'c.png' } }));
+      check('Teo não define a foto do coração', r.res.status === 404);
+      r = await juan('POST', '/api/heart-photo', form({ name: 'Juan', crop: JSON.stringify({ itemId: vPng.id, x: 0.1, y: -0.2, zoom: 2 }), photo: { buffer: PNG, type: 'image/png', name: 'c.png' } }));
+      check('Juan define a foto do coração', r.res.status === 200 && !!r.json.photo);
+      r = await juan('GET', '/api/heart-photo?name=Juan', undefined, { raw: true });
+      check('foto do coração volta pro dono', r.res.status === 200 && r.buf.equals(PNG));
+      r = await teo('GET', '/api/heart-photo?name=Teo', undefined, { raw: true });
+      check('Teo não baixa a foto do coração', r.res.status === 404);
+      r = await teo('GET', '/api/boot?name=Teo');
+      check('boot do Teo não sabe do coração', r.json.heart === null);
+      r = await juan('GET', '/api/boot?name=Juan');
+      check('boot do Juan liga o coração', r.json.heart && r.json.heart.photo && typeof r.json.heart.photo.v === 'number');
+      r = await juan('GET', '/api/heart-photo/crop?name=Juan');
+      check('enquadramento guardado', r.json.crop && r.json.crop.itemId === vPng.id && r.json.crop.zoom === 2);
+      r = await juan('POST', '/api/vault/lock', {});
+      r = await juan('GET', '/api/heart-photo?name=Juan', undefined, { raw: true });
+      check('animação funciona com o cofre trancado', r.res.status === 200);
+      r = await juan('POST', '/api/heart-photo/remove', { name: 'Juan' });
+      check('tirar a foto exige cofre aberto', r.res.status === 401);
+      r = await juan('POST', '/api/vault/unlock', { sender: 'Juan', code: 'cofre-do-juan' });
+      r = await juan('POST', '/api/heart-photo/remove', { name: 'Juan' });
+      r = await juan('GET', '/api/heart-photo?name=Juan', undefined, { raw: true });
+      check('tira a foto do coração', r.res.status === 404);
+
       r = await juan('POST', '/api/vault/lock', {});
       r = await juan('GET', '/api/vault/items?name=Juan');
       check('trancado: lista = 401', r.res.status === 401);
@@ -991,6 +1145,7 @@ async function main() {
     fs.rmSync(DATA_DIR, { recursive: true, force: true });
     if (waDir) fs.rmSync(waDir, { recursive: true, force: true });
     fs.rmSync(teoPhone, { force: true });
+    fs.rmSync(changelogFile, { force: true });
   }
 
   console.log(`\n${passed} ok, ${failed} falharam`);

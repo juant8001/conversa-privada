@@ -93,6 +93,17 @@
   const emptyState = document.getElementById('empty-state');
   const toastEl = document.getElementById('toast');
   const presenceDotEl = document.querySelector('.chat-header .dot');
+  const presenceBtn = document.getElementById('presence-btn');
+  const presenceTextEl = document.getElementById('presence-text');
+  const presenceOverlay = document.getElementById('presence-overlay');
+  const presenceListEl = document.getElementById('presence-list');
+  const presenceCloseBtn = document.getElementById('presence-close');
+  const editHistoryOverlay = document.getElementById('edit-history-overlay');
+  const editHistoryList = document.getElementById('edit-history-list');
+  const editHistoryClose = document.getElementById('edit-history-close');
+  const backupOverlay = document.getElementById('backup-overlay');
+  const backupBody = document.getElementById('backup-body');
+  const backupClose = document.getElementById('backup-close');
   const replyBar = document.getElementById('reply-bar');
   const replyBarThumb = document.getElementById('reply-bar-thumb');
   const replyBarSender = document.getElementById('reply-bar-sender');
@@ -106,6 +117,7 @@
   const msgMenuBackdrop = document.getElementById('msg-menu-backdrop');
   const msgMenuGotoBtn = document.getElementById('msg-menu-goto');
   const msgMenuReplyBtn = document.getElementById('msg-menu-reply');
+  const msgMenuEditBtn = document.getElementById('msg-menu-edit');
   const msgMenuCopyBtn = document.getElementById('msg-menu-copy');
   const msgMenuSelectBtn = document.getElementById('msg-menu-select');
   const msgMenuDelBtn = document.getElementById('msg-menu-delete');
@@ -242,6 +254,7 @@
   }
 
   let replyingTo = null;
+  let editingMsg = null; // { id, text } enquanto edita uma mensagem (v54)
   // Mesma regra do buildMediaTile (aba Mídia): prefere thumbId, cai pro
   // mediaId só pra foto (nunca vídeo - um <img> num .mp4 cru baixa o
   // arquivo inteiro e não decodifica nada), e nunca pra ephemeral (que já
@@ -254,6 +267,7 @@
     return undefined;
   }
   function setReplyingTo(m) {
+    if (editingMsg) clearEditing();
     replyingTo = { id: m.id, sender: m.sender, snippet: snippetFor(m) };
     replyBarSender.textContent = m.sender;
     replyBarSender.style.color = nameColor(m.sender);
@@ -276,12 +290,14 @@
   }
   function clearReplyingTo() {
     replyingTo = null;
+    // A barra está mostrando "Editando mensagem": não é dela que se trata.
+    if (editingMsg) return;
     replyBar.classList.add('hidden');
     replyBarThumb.classList.add('hidden');
     replyBarThumb.removeAttribute('src');
     document.documentElement.style.setProperty('--reply-bar-h', '0px');
   }
-  replyBarCancel.addEventListener('click', clearReplyingTo);
+  replyBarCancel.addEventListener('click', () => (editingMsg ? clearEditing() : clearReplyingTo()));
 
   // opts.smooth (padrão true) existe pro salto de longe: animar a rolagem por
   // cima de centenas de linhas recém-renderizadas fica lento e sacudido, então
@@ -367,26 +383,207 @@
     }, ms || 3200);
   }
 
-  // "A outra pessoa esta online agora" - presence tracking piggybacks on
-  // the same SSE stream as messages (see connectStream): the server sends
-  // a presence-init snapshot the instant this tab connects (who was ALREADY
-  // here), then keeps pushing presence updates as either side joins/leaves.
-  // announcedPresenceOnEntry guards against re-toasting on the browser's own
-  // silent EventSource auto-reconnect (flaky wifi, phone screen lock, etc.) -
-  // it only resets when connectStream() is explicitly called again (fresh
-  // login), not on every dropped/retried connection.
+  // ---------------------------------------------------------------------
+  // Presença (v54)
+  //
+  // Antes, "online" era só "tem uma conexão aberta" - e uma conexão fica
+  // aberta com a aba em segundo plano, a tela bloqueada ou o celular no
+  // bolso (e às vezes, pelo túnel, nem fecha quando a pessoa sai). Agora
+  // cada aba diz ao servidor em que estado está (ver lib/presence.js):
+  //   active - aba na tela e alguém mexendo nela        -> online
+  //   idle   - aba na tela, mas parada há uns minutos     -> ausente
+  //   hidden - segundo plano / tela bloqueada / fechando -> não conta
+  // e bate a cada PRESENCE_BEAT_MS enquanto está na tela. Aba que para de
+  // bater cai sozinha no servidor. PRESENCE_CID identifica esta aba (o
+  // mesmo id vai no SSE e nas batidas).
+  // ---------------------------------------------------------------------
   let announcedPresenceOnEntry = false;
-  function otherPeopleOnline(online) {
-    return (online || []).filter((n) => n && !sameName(n, myName()));
+  let presenceSnap = { online: [], people: [] };
+  const PRESENCE_CID = (() => {
+    try {
+      const a = new Uint8Array(9);
+      window.crypto.getRandomValues(a);
+      return Array.from(a, (b) => b.toString(16).padStart(2, '0')).join('');
+    } catch (e) {
+      return `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
+    }
+  })();
+  const PRESENCE_BEAT_MS = 20000;
+  const PRESENCE_IDLE_MS = 3 * 60 * 1000;     // na tela, sem ninguém mexer
+  const PRESENCE_BLUR_IDLE_MS = 60 * 1000;    // janela sem foco (computador)
+  let lastInteraction = Date.now();
+  let lastSentPresence = '';
+  let lastBeatAt = 0;
+  let presenceTimer = null;
+  let presenceActive = false;
+
+  function deviceLabel() {
+    const ua = navigator.userAgent || '';
+    if (/iPhone/.test(ua)) return 'iPhone';
+    if (/iPad/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1)) return 'iPad';
+    if (/Android/.test(ua)) return 'Android';
+    if (/Macintosh|Mac OS X/.test(ua)) return 'Mac';
+    if (/Windows/.test(ua)) return 'Windows';
+    if (/Linux/.test(ua)) return 'Linux';
+    return 'navegador';
   }
-  function updatePresenceIndicator(online) {
-    if (!presenceDotEl) return;
-    const others = otherPeopleOnline(online);
-    presenceDotEl.classList.toggle('offline', others.length === 0);
-    presenceDotEl.title = others.length
-      ? `${others[0]} está online agora`
-      : 'Ninguém mais online agora';
+  const DEVICE_LABEL = deviceLabel();
+
+  function currentPresenceState() {
+    if (document.visibilityState !== 'visible') return 'hidden';
+    const quiet = Date.now() - lastInteraction;
+    if (quiet > PRESENCE_IDLE_MS) return 'idle';
+    let focused = true;
+    try { focused = document.hasFocus(); } catch (e) { /* segue */ }
+    if (!focused && quiet > PRESENCE_BLUR_IDLE_MS) return 'idle';
+    return 'active';
   }
+
+  function beatPresence() {
+    if (!presenceActive) return;
+    const name = myName();
+    if (!name) return;
+    const state = currentPresenceState();
+    lastSentPresence = `${name}|${state}`;
+    lastBeatAt = Date.now();
+    fetch(api('/api/presence'), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ cid: PRESENCE_CID, name, state, device: DEVICE_LABEL }),
+      keepalive: true,
+    })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => { if (d && d.presence) applyPresence(d.presence); })
+      .catch(() => {});
+  }
+
+  // Saindo/escondendo a página: sendBeacon chega mesmo com a aba sendo
+  // fechada ou congelada pelo iOS.
+  function beatPresenceOnExit() {
+    if (!presenceActive || !myName()) return;
+    lastSentPresence = `${myName()}|hidden`;
+    const body = JSON.stringify({ cid: PRESENCE_CID, name: myName(), state: 'hidden', device: DEVICE_LABEL });
+    try {
+      if (navigator.sendBeacon && navigator.sendBeacon(api('/api/presence'), new Blob([body], { type: 'text/plain' }))) return;
+    } catch (e) { /* cai no fetch */ }
+    fetch(api('/api/presence'), {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body, keepalive: true,
+    }).catch(() => {});
+  }
+
+  function checkPresenceChange() {
+    if (!presenceActive || !myName()) return;
+    const sig = `${myName()}|${currentPresenceState()}`;
+    if (sig !== lastSentPresence) beatPresence();
+  }
+
+  function startPresence() {
+    presenceActive = true;
+    lastInteraction = Date.now();
+    clearInterval(presenceTimer);
+    // Um relógio só: a cada 5s vê se o estado mudou (ficou ausente, por
+    // exemplo) e, com a aba na tela, bate de novo a cada PRESENCE_BEAT_MS.
+    presenceTimer = setInterval(() => {
+      if (document.visibilityState === 'visible' && Date.now() - lastBeatAt >= PRESENCE_BEAT_MS) beatPresence();
+      else checkPresenceChange();
+    }, 5000);
+    beatPresence();
+  }
+
+  function stopPresence() {
+    if (presenceActive) beatPresenceOnExit();
+    presenceActive = false;
+    clearInterval(presenceTimer);
+  }
+
+  function noteInteraction() {
+    const wasActive = currentPresenceState() === 'active';
+    lastInteraction = Date.now();
+    if (!wasActive) checkPresenceChange();
+  }
+  ['pointerdown', 'keydown', 'touchstart', 'wheel'].forEach((t) => {
+    document.addEventListener(t, noteInteraction, { passive: true, capture: true });
+  });
+  let lastMoveNote = 0;
+  const throttledInteraction = () => {
+    const now = Date.now();
+    if (now - lastMoveNote < 4000) return;
+    lastMoveNote = now;
+    noteInteraction();
+  };
+  document.addEventListener('mousemove', throttledInteraction, { passive: true });
+  document.addEventListener('scroll', throttledInteraction, { passive: true, capture: true });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') lastInteraction = Date.now();
+    if (document.visibilityState === 'hidden') beatPresenceOnExit();
+    else checkPresenceChange();
+  });
+  window.addEventListener('focus', () => { lastInteraction = Date.now(); checkPresenceChange(); });
+  window.addEventListener('pagehide', beatPresenceOnExit);
+  window.addEventListener('pageshow', () => {
+    if (!presenceActive) return;
+    lastInteraction = Date.now();
+    beatPresence();
+  });
+
+  const PRESENCE_RANK = { online: 3, away: 2, offline: 1 };
+
+  function presenceOthers(snap) {
+    return ((snap && snap.people) || []).filter((p) => p && p.name && !sameName(p.name, myName()));
+  }
+
+  function fmtAgo(ts) {
+    const diff = Date.now() - ts;
+    if (diff < 60000) return 'há menos de 1 min';
+    const min = Math.round(diff / 60000);
+    if (min < 60) return `há ${min} min`;
+    const hhmm = fmtTime(ts);
+    if (dateKey(ts) === dateKey(Date.now())) return `hoje às ${hhmm}`;
+    const y = new Date();
+    y.setDate(y.getDate() - 1);
+    if (dateKey(ts) === dateKey(y.getTime())) return `ontem às ${hhmm}`;
+    const d = new Date(ts);
+    return `${d.toLocaleDateString('pt-BR', { day: '2-digit', month: 'short' }).replace('.', '')} às ${hhmm}`;
+  }
+
+  function personStatusText(p) {
+    if (p.state === 'online') return 'online agora';
+    if (p.state === 'away') return p.lastSeen ? `ausente · parado ${fmtAgo(p.lastSeen)}` : 'ausente';
+    return p.lastSeen ? `visto por último ${fmtAgo(p.lastSeen)}` : 'offline';
+  }
+
+  function applyPresence(snap) {
+    if (!snap) return;
+    if (!Array.isArray(snap.people)) {
+      // formato antigo ({ online: [...] }) - por segurança durante o deploy
+      const online = Array.isArray(snap.online) ? snap.online : [];
+      snap = { online, people: online.map((n) => ({ name: n, state: 'online', devices: [], lastSeen: null })) };
+    }
+    presenceSnap = snap;
+    renderPresenceHeader();
+    if (presenceOverlay && !presenceOverlay.classList.contains('hidden')) renderPresencePanel();
+  }
+
+  function renderPresenceHeader() {
+    const others = presenceOthers(presenceSnap)
+      .sort((a, b) => (PRESENCE_RANK[b.state] - PRESENCE_RANK[a.state]) || ((b.lastSeen || 0) - (a.lastSeen || 0)));
+    const top = others[0];
+    const state = top ? top.state : 'offline';
+    if (presenceDotEl) {
+      presenceDotEl.classList.toggle('offline', state === 'offline');
+      presenceDotEl.classList.toggle('away', state === 'away');
+    }
+    const text = top ? `${top.name} · ${personStatusText(top)}` : 'ninguém mais por aqui ainda';
+    if (presenceTextEl) {
+      presenceTextEl.textContent = text;
+      presenceTextEl.dataset.state = state;
+    }
+    if (presenceBtn) presenceBtn.title = `${text} — toque pra ver quem está aqui`;
+  }
+  setInterval(() => {
+    renderPresenceHeader();
+    if (presenceOverlay && !presenceOverlay.classList.contains('hidden')) renderPresencePanel();
+  }, 30000);
 
   function updateEmptyState() {
     const isEmpty = renderedIds.size === 0;
@@ -446,7 +643,7 @@
 
   function openMessageMenu(id, at) {
     const m = loadedMessages.find((x) => x.id === id);
-    if (!m || m.deleted) return;
+    if (!m || m.deleted || m.type === 'system') return;
     // Re-disparo em cima do mesmo balão (alguns Android disparam 'contextmenu'
     // E o nosso timer de toque longo quase juntos): não reposiciona, ignora.
     if (activeMenuMsgId === id) return;
@@ -457,6 +654,8 @@
     msgMenuSelectBtn.classList.toggle('hidden', !isSelectableText);
     msgMenuGotoBtn.classList.add('hidden');   // já estamos na conversa
     msgMenuReplyBtn.classList.remove('hidden');
+    // Editar: só texto, só quem mandou (o servidor confere de novo).
+    msgMenuEditBtn.classList.toggle('hidden', !(isSelectableText && sameName(m.sender, myName())));
     msgMenuDelBtn.classList.remove('hidden');
     msgMenuReactions.classList.remove('hidden');
     msgMenuRemoveBtn.classList.add('hidden'); // só existe no menu da bandeja
@@ -490,6 +689,7 @@
 
     msgMenuGotoBtn.classList.remove('hidden');
     msgMenuReplyBtn.classList.add('hidden');
+    msgMenuEditBtn.classList.add('hidden');
     msgMenuCopyBtn.classList.add('hidden');
     msgMenuSelectBtn.classList.add('hidden');
     msgMenuDelBtn.classList.add('hidden');
@@ -508,6 +708,7 @@
     if (!id || activeMenuMsgId === id) return;
     msgMenuGotoBtn.classList.add('hidden');
     msgMenuReplyBtn.classList.add('hidden');
+    msgMenuEditBtn.classList.add('hidden');
     msgMenuCopyBtn.classList.add('hidden');
     msgMenuSelectBtn.classList.add('hidden');
     msgMenuDelBtn.classList.add('hidden');
@@ -599,6 +800,11 @@
     const m = loadedMessages.find((x) => x.id === activeMenuMsgId);
     closeMessageMenu();
     if (m) setReplyingTo(m);
+  });
+  msgMenuEditBtn.addEventListener('click', () => {
+    const m = loadedMessages.find((x) => x.id === activeMenuMsgId);
+    closeMessageMenu();
+    if (m && m.type === 'text' && !m.deleted) setEditing(m);
   });
   // navigator.clipboard só existe em contexto seguro (https, ou http em
   // localhost) - testando pelo IP da rede local (npm run start:lan) a
@@ -1185,6 +1391,7 @@
     const el = document.createElement('span');
     el.className = overlay ? 'msg-time msg-time-overlay' : 'msg-time';
     el.textContent = fmtTime(ts);
+    el.dataset.t = el.textContent;
     return el;
   }
 
@@ -1570,7 +1777,9 @@
       bubble.appendChild(textEl);
       // A hora é absoluta no canto do balão (ver .msg-time); a ordem no DOM
       // não muda onde ela aparece, mas deixamos por último por clareza.
-      bubble.appendChild(makeTimeEl(m.ts));
+      const timeEl = makeTimeEl(m.ts);
+      if (m.editedAt) addEditedTag(timeEl, m.id);
+      bubble.appendChild(timeEl);
     } else if (m.type === 'image') {
       const wrap = document.createElement('span');
       wrap.className = 'bubble-media-wrap';
@@ -1737,7 +1946,7 @@
         }
         return;
       }
-      revealEphemeralBubble(bubble, data.message, data.remainingMs);
+      revealEphemeralBubble(bubble, data.message, data.remainingMs, data.closesOnEnd);
     } catch (err) {
       toast('Erro de conexão ao abrir a mídia.');
       bubble.classList.remove('is-opening');
@@ -1751,7 +1960,7 @@
   // still comes from the server's own "message-deleted" broadcast a few
   // seconds later (applyDeletedPlaceholder is idempotent), so this local
   // countdown reaching zero is just the visible half of that.
-  function revealEphemeralBubble(bubble, m, remainingMs) {
+  function revealEphemeralBubble(bubble, m, remainingMs, closesOnEnd) {
     bubble.classList.remove('ephemeral-locked', 'is-interactive', 'is-opening');
     bubble.replaceChildren();
     buildBubbleContent(bubble, m);
@@ -1760,6 +1969,41 @@
     countdown.className = 'ephemeral-countdown';
     const wrap = bubble.querySelector('.bubble-media-wrap');
     (wrap || bubble).appendChild(countdown);
+
+    // Vídeo (v54): nada de contagem de 10s cortando no meio. Fica até o
+    // vídeo terminar, a pessoa tocar em "Fechar" ou sair da página - aí avisa
+    // o servidor (view-done) e some. remainingMs é só o teto de segurança.
+    if (closesOnEnd && m.type === 'video') {
+      countdown.classList.add('is-video');
+      countdown.textContent = 'some ao terminar';
+      const vid = bubble.querySelector('video');
+      const closeBtn = document.createElement('button');
+      closeBtn.type = 'button';
+      closeBtn.className = 'ephemeral-close';
+      closeBtn.textContent = 'Fechar';
+      (wrap || bubble).appendChild(closeBtn);
+      let finished = false;
+      const finish = () => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(cap);
+        window.removeEventListener('pagehide', finish);
+        finishEphemeralView(m.id);
+      };
+      const cap = setTimeout(finish, Math.max(remainingMs || 0, 1000));
+      if (vid) {
+        vid.preload = 'auto';
+        vid.playsInline = true;
+        vid.addEventListener('ended', finish);
+        vid.play().catch(() => {});
+      }
+      closeBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        finish();
+      });
+      window.addEventListener('pagehide', finish);
+      return;
+    }
 
     let remaining = Math.max(Math.round((remainingMs || 0) / 1000), 1);
     countdown.textContent = `${remaining}s`;
@@ -1795,6 +2039,17 @@
       lastSender = null;
     }
 
+    // Cartão de "Atualização do sistema" (changelog, v54): centralizado, sem
+    // balão, sem menu, e quebra o agrupamento de mensagens.
+    if (m.type === 'system') {
+      messagesEl.appendChild(buildSystemRow(m, animate));
+      lastRow = null;
+      lastSender = null;
+      lastTs = null;
+      updateEmptyState();
+      return;
+    }
+
     const color = nameColor(m.sender);
     // Lado da bolha = quem está olhando a tela, como em qualquer mensageiro:
     // o que EU mandei vai pra direita, o resto pra esquerda. A identidade é o
@@ -1815,6 +2070,7 @@
     row.dataset.id = m.id;
     // Estrelinha ao lado da hora nas mensagens que EU favoritei (CSS).
     if (!m.deleted && isStarredByMe(m)) row.classList.add('is-starred');
+    if (!m.deleted && m.editedAt) row.classList.add('is-edited');
 
     // Esta mensagem se agrupa com a anterior → a bolha de cima deixa de ser a
     // última do grupo e perde o canto "apontado" (ver .has-follower no CSS).
@@ -1958,7 +2214,8 @@
       // or already mid-reveal with a live countdown) before wiping it, so
       // the placeholder still carries a timestamp like every other bubble.
       const existingTime = bubble.querySelector('.msg-time');
-      const tsText = existingTime ? existingTime.textContent : '';
+      const tsText = existingTime ? (existingTime.dataset.t || existingTime.textContent) : '';
+      row.classList.remove('is-edited');
       bubble.className = 'bubble deleted';
       bubble.replaceChildren();
       const label = document.createElement('span');
@@ -2680,22 +2937,30 @@
   function connectStream() {
     if (es) es.close();
     announcedPresenceOnEntry = false;
-    es = new EventSource(api(`/api/stream?name=${encodeURIComponent(myName())}`));
+    const presenceQs = `cid=${PRESENCE_CID}&device=${encodeURIComponent(DEVICE_LABEL)}&state=${currentPresenceState()}`;
+    es = new EventSource(api(`/api/stream?name=${encodeURIComponent(myName())}&${presenceQs}`));
+    startPresence();
+    // Reconectou (rede caiu, celular acordou): manda o estado de agora.
+    es.addEventListener('open', () => beatPresence());
     // Snapshot sent once, right when this tab connects: who was ALREADY in
     // the room before I joined. This - and only this - is what triggers the
     // entry toast; later joins/leaves just update the header dot silently.
     es.addEventListener('presence-init', (evt) => {
-      const { online } = JSON.parse(evt.data);
-      updatePresenceIndicator(online);
-      const others = otherPeopleOnline(online);
+      applyPresence(JSON.parse(evt.data));
+      const others = presenceOthers(presenceSnap).filter((p) => p.state === 'online');
       if (others.length && !announcedPresenceOnEntry) {
-        toast(`${others[0]} já está online agora.`);
+        toast(`${others[0].name} já está online agora.`);
       }
       announcedPresenceOnEntry = true;
     });
     es.addEventListener('presence', (evt) => {
-      const { online } = JSON.parse(evt.data);
-      updatePresenceIndicator(online);
+      applyPresence(JSON.parse(evt.data));
+    });
+    es.addEventListener('message-edited', (evt) => {
+      const { id, text, editedAt, edits } = JSON.parse(evt.data);
+      patchLoadedMessage(id, { text, editedAt, edits, linkPreview: undefined });
+      applyEdit(id, text);
+      if (editHistoryOpenId === id) renderEditHistory(id);
     });
     es.addEventListener('message-updated', (evt) => {
       const { id, linkPreview } = JSON.parse(evt.data);
@@ -2783,6 +3048,7 @@
   }
 
   function showLogin() {
+    stopPresence();
     loginScreen.classList.remove('hidden');
     chatScreen.classList.add('hidden');
     noticeScreen.classList.add('hidden');
@@ -3086,6 +3352,29 @@
       return;
     }
     if (!text) return;
+    if (editingMsg) {
+      const target = editingMsg;
+      clearEditing(true);
+      textInput.value = '';
+      syncTextInputUI();
+      if (text === target.text) return;
+      try {
+        const res = await fetch(api(`/api/messages/${target.id}/edit`), {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ requesterName: sender, text }),
+        });
+        if (!res.ok) {
+          const d = await res.json().catch(() => ({}));
+          toast(d.message || 'Não foi possível editar a mensagem.');
+        }
+      } catch (err) {
+        toast('Erro de conexão ao editar.');
+        textInput.value = text;
+        syncTextInputUI();
+      }
+      return;
+    }
     if (isLoveTrigger(text)) {
       textInput.value = '';
       syncTextInputUI();
@@ -3484,7 +3773,9 @@
       const settle = (probe, width, height) => {
         if (!width || !height) return finish(null);
         drawThumb(probe, width, height).then((thumb) => {
-          finish({ width, height, thumb });
+          // Duração do vídeo: dá o tamanho da janela da visualização única.
+          const duration = Number.isFinite(probe.duration) && probe.duration > 0 ? probe.duration : undefined;
+          finish({ width, height, thumb, duration });
         });
       };
 
@@ -3609,6 +3900,7 @@
       if (meta) {
         form.append('width', String(meta.width));
         form.append('height', String(meta.height));
+        if (meta.duration) form.append('duration', String(meta.duration));
         // Visualização única não ganha miniatura: uma thumb persistente
         // sobreviveria aos 10s e furaria o sentido inteiro do recurso. O
         // servidor recusa de novo por conta própria, isto aqui só evita
@@ -4142,6 +4434,7 @@
       stickerToolsEnabled = !!data.stickerTools;
       waImportEnabled = !!data.waImport;
       setVaultEnabled(!!data.vault);
+      applyHeartConfig(data.heart || null);
       gifSearchForm.classList.toggle('hidden', !giphyEnabled);
       syncStickerHeader();
       hermesCfg = data.hermes || null;
@@ -5150,6 +5443,9 @@
   const vaultPreviewMedia = document.getElementById('vault-preview-media');
   const vaultPreviewSend = document.getElementById('vault-preview-send');
   const vaultPreviewClose = document.getElementById('vault-preview-close');
+  const vaultPreviewHeart = document.getElementById('vault-preview-heart');
+  const vaultAddBtn = document.getElementById('vault-add');
+  const vaultAddInput = document.getElementById('vault-add-input');
   const VAULT_KINDS = [
     { id: '', title: 'Tudo' },
     { id: 'image', title: 'Fotos' },
@@ -5207,6 +5503,7 @@
     vaultFooter.classList.add('hidden');
     vaultSelectBtn.classList.add('hidden');
     vaultLockBtn.classList.add('hidden');
+    vaultAddBtn.classList.add('hidden');
     vaultGate.classList.remove('hidden');
     vaultCode.value = '';
     vaultCode2.value = '';
@@ -5271,6 +5568,7 @@
     vaultBody.classList.remove('hidden');
     vaultLockBtn.classList.remove('hidden');
     vaultSelectBtn.classList.remove('hidden');
+    vaultAddBtn.classList.remove('hidden');
     vaultCounts = st.counts || {};
     renderVaultChips();
     const job = st.job;
@@ -5412,6 +5710,7 @@
     }
     el.src = src;
     vaultPreviewMedia.appendChild(el);
+    vaultPreviewHeart.classList.toggle('hidden', it.kind !== 'image' || it.mime === 'image/gif');
     vaultPreview.classList.remove('hidden');
   }
 
@@ -6048,9 +6347,7 @@
     onSheetEmoji(found);
   });
 
-  exportBtn.addEventListener('click', () => {
-    window.open(api('/api/export'), '_blank');
-  });
+  exportBtn.addEventListener('click', openBackupPanel);
 
   clearBtn.addEventListener('click', async () => {
     const step1 = await askConfirm(
@@ -6080,6 +6377,957 @@
     if (es) es.close();
     showLogin();
   });
+
+
+  // =====================================================================
+  // v54: editar mensagem, histórico, cartão do sistema, visualização única
+  // de vídeo, quem está aqui, backup em partes, fotos no cofre e o coração
+  // =====================================================================
+
+  // ---- editar mensagem ----
+  // Reaproveita a barra de resposta acima do campo ("Editando mensagem"): o
+  // texto vai pro campo, Enter/enviar salva a edição, X ou Esc cancela.
+  function setEditing(m) {
+    clearReplyingTo();
+    editingMsg = { id: m.id, text: m.text };
+    replyBar.classList.add('is-editing');
+    replyBarSender.textContent = 'Editando mensagem';
+    replyBarSender.style.color = '';
+    replyBarSnippet.replaceChildren();
+    renderRich(replyBarSnippet, m.text, { links: false });
+    replyBarThumb.classList.add('hidden');
+    replyBarThumb.removeAttribute('src');
+    replyBarCancel.title = 'Cancelar edição';
+    replyBar.classList.remove('hidden');
+    document.documentElement.style.setProperty('--reply-bar-h', `${replyBar.offsetHeight}px`);
+    textInput.value = m.text;
+    syncTextInputUI();
+    textInput.focus();
+    try {
+      textInput.setSelectionRange(textInput.value.length, textInput.value.length);
+    } catch (e) { /* alguns navegadores não deixam */ }
+  }
+
+  function clearEditing(keepText) {
+    if (!editingMsg) return;
+    editingMsg = null;
+    replyBar.classList.remove('is-editing');
+    replyBarCancel.title = 'Cancelar resposta';
+    replyBar.classList.add('hidden');
+    document.documentElement.style.setProperty('--reply-bar-h', '0px');
+    if (!keepText) {
+      textInput.value = '';
+      syncTextInputUI();
+    }
+  }
+
+  textInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && editingMsg) {
+      e.preventDefault();
+      e.stopPropagation();
+      clearEditing();
+    }
+  });
+
+  // "editada" dentro da hora do balão; tocar abre o histórico.
+  function addEditedTag(timeEl, id) {
+    if (timeEl.querySelector('.edited-tag')) return;
+    const tag = document.createElement('button');
+    tag.type = 'button';
+    tag.className = 'edited-tag';
+    tag.textContent = 'editada';
+    tag.title = 'Ver o que foi editado';
+    tag.addEventListener('click', (e) => {
+      e.stopPropagation();
+      openEditHistory(id);
+    });
+    timeEl.insertBefore(tag, timeEl.firstChild);
+  }
+
+  // Edição chegou pelo SSE: troca o texto do balão que já está na tela.
+  function applyEdit(id, text) {
+    const row = messagesEl.querySelector(`.msg-row[data-id="${id}"]`);
+    const bubble = row && row.querySelector('.bubble');
+    if (!bubble || bubble.classList.contains('deleted')) return;
+    row.classList.add('is-edited');
+    const card = bubble.querySelector('.link-preview-card');
+    if (card) card.remove();
+    const textEl = bubble.querySelector(':scope > .bubble-text');
+    if (textEl) {
+      textEl.replaceChildren();
+      renderRich(textEl, text);
+    }
+    const timeEl = bubble.querySelector(':scope > .msg-time');
+    if (timeEl) addEditedTag(timeEl, id);
+  }
+
+  // ---- histórico de edição ----
+  let editHistoryOpenId = null;
+
+  function openEditHistory(id) {
+    if (!loadedMessages.find((x) => x.id === id)) return;
+    editHistoryOpenId = id;
+    renderEditHistory(id);
+    editHistoryOverlay.classList.remove('hidden');
+  }
+
+  function closeEditHistory() {
+    editHistoryOpenId = null;
+    editHistoryOverlay.classList.add('hidden');
+    editHistoryList.replaceChildren();
+  }
+
+  function renderEditHistory(id) {
+    const m = loadedMessages.find((x) => x.id === id);
+    if (!m || m.deleted) {
+      closeEditHistory();
+      return;
+    }
+    const versions = (m.edits || []).map((v) => ({ text: v.text, ts: v.ts }));
+    versions.push({ text: m.text, ts: m.editedAt || m.ts });
+    editHistoryList.replaceChildren();
+    versions.forEach((v, i) => {
+      const last = i === versions.length - 1;
+      const item = document.createElement('div');
+      item.className = `edit-version${last ? ' is-current' : ''}`;
+      const head = document.createElement('div');
+      head.className = 'edit-version-head';
+      const label = document.createElement('span');
+      label.className = 'edit-version-label';
+      if (i === 0) label.textContent = 'Original';
+      else if (last) label.textContent = versions.length > 2 ? `Atual (edição ${i})` : 'Atual';
+      else label.textContent = `Edição ${i}`;
+      const when = document.createElement('span');
+      when.textContent = `${fmtDateDivider(v.ts)} · ${fmtTime(v.ts)}`;
+      head.append(label, when);
+      const body = document.createElement('div');
+      body.className = 'edit-version-text';
+      if (i === 0) body.textContent = v.text;
+      else renderDiff(body, versions[i - 1].text, v.text);
+      item.append(head, body);
+      editHistoryList.appendChild(item);
+    });
+  }
+
+  // Diferença por palavra (LCS) entre duas versões. Texto enorme demais pra
+  // comparar rápido: mostra só a versão nova.
+  function diffTokens(a, b) {
+    const A = String(a).split(/(\s+)/).filter(Boolean);
+    const B = String(b).split(/(\s+)/).filter(Boolean);
+    const n = A.length;
+    const m = B.length;
+    if (n * m > 4000000) return null;
+    const w = m + 1;
+    const dp = new Uint32Array((n + 1) * w);
+    for (let i = n - 1; i >= 0; i--) {
+      for (let j = m - 1; j >= 0; j--) {
+        dp[i * w + j] = A[i] === B[j] ? dp[(i + 1) * w + j + 1] + 1 : Math.max(dp[(i + 1) * w + j], dp[i * w + j + 1]);
+      }
+    }
+    const out = [];
+    let i = 0;
+    let j = 0;
+    while (i < n && j < m) {
+      if (A[i] === B[j]) { out.push(['=', A[i]]); i++; j++; }
+      else if (dp[(i + 1) * w + j] >= dp[i * w + j + 1]) { out.push(['-', A[i]]); i++; }
+      else { out.push(['+', B[j]]); j++; }
+    }
+    while (i < n) out.push(['-', A[i++]]);
+    while (j < m) out.push(['+', B[j++]]);
+    return out;
+  }
+
+  function renderDiff(el, prev, cur) {
+    const ops = diffTokens(prev, cur);
+    if (!ops) {
+      el.textContent = cur;
+      return;
+    }
+    // Junta pedaços seguidos do mesmo tipo; espaço solto entre dois trechos
+    // mudados não ganha marcação própria.
+    const merged = [];
+    for (const [op, tok] of ops) {
+      const lastOp = merged[merged.length - 1];
+      if (lastOp && lastOp[0] === op) lastOp[1] += tok;
+      else merged.push([op, tok]);
+    }
+    for (const [op, tok] of merged) {
+      if (op === '=' || !tok.trim()) {
+        if (op !== '-') el.appendChild(document.createTextNode(tok));
+        continue;
+      }
+      const mark = document.createElement(op === '-' ? 'del' : 'ins');
+      mark.className = op === '-' ? 'diff-del' : 'diff-add';
+      mark.textContent = tok;
+      el.appendChild(mark);
+    }
+  }
+
+  editHistoryClose.addEventListener('click', closeEditHistory);
+  editHistoryOverlay.addEventListener('click', (e) => {
+    if (e.target === editHistoryOverlay) closeEditHistory();
+  });
+
+  // ---- cartão "Atualização do sistema" (changelog) ----
+  function buildSystemRow(m, animate) {
+    const row = document.createElement('div');
+    row.className = `msg-row system-row${animate ? ' msg-enter' : ''}`;
+    row.dataset.id = m.id;
+    const card = document.createElement('div');
+    card.className = 'system-card';
+    const head = document.createElement('div');
+    head.className = 'system-card-head';
+    const badge = document.createElement('span');
+    badge.textContent = '✨ Atualização do sistema';
+    const ver = document.createElement('span');
+    ver.className = 'system-card-version';
+    ver.textContent = m.version || '';
+    head.append(badge, ver);
+    card.appendChild(head);
+    if (m.title) {
+      const title = document.createElement('div');
+      title.className = 'system-card-title';
+      title.textContent = m.title;
+      card.appendChild(title);
+    }
+    if (Array.isArray(m.items) && m.items.length) {
+      const ul = document.createElement('ul');
+      ul.className = 'system-card-items';
+      for (const t of m.items) {
+        const li = document.createElement('li');
+        li.textContent = t;
+        ul.appendChild(li);
+      }
+      card.appendChild(ul);
+    }
+    const foot = document.createElement('div');
+    foot.className = 'system-card-foot';
+    foot.textContent = fmtTime(m.ts);
+    card.appendChild(foot);
+    row.appendChild(card);
+    return row;
+  }
+
+  // ---- visualização única: terminou de ver ----
+  function finishEphemeralView(id) {
+    const body = JSON.stringify({ requesterName: myName() });
+    let sent = false;
+    try {
+      sent = !!(navigator.sendBeacon && navigator.sendBeacon(api(`/api/messages/${id}/view-done`), new Blob([body], { type: 'text/plain' })));
+    } catch (e) { /* cai no fetch */ }
+    if (!sent) {
+      fetch(api(`/api/messages/${id}/view-done`), {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body, keepalive: true,
+      }).catch(() => {});
+    }
+    patchLoadedMessage(id, { deleted: true, expiredEphemeral: true });
+    applyDeletedPlaceholder(id, true);
+  }
+
+  // ---- quem está aqui ----
+  const DEVICE_STATE_LABEL = { online: 'com a conversa na tela', away: 'conversa aberta, parada', hidden: 'em segundo plano' };
+
+  function renderPresencePanel() {
+    presenceListEl.replaceChildren();
+    const me = myName();
+    const people = (presenceSnap.people || []).slice();
+    if (!people.some((p) => sameName(p.name, me))) {
+      people.push({ name: me, state: 'online', lastSeen: null, devices: [{ id: PRESENCE_CID, device: DEVICE_LABEL, state: 'online' }] });
+    }
+    // Os outros primeiro (mais ativo em cima), você por último.
+    people.sort((a, b) => {
+      const am = sameName(a.name, me) ? 1 : 0;
+      const bm = sameName(b.name, me) ? 1 : 0;
+      if (am !== bm) return am - bm;
+      return (PRESENCE_RANK[b.state] - PRESENCE_RANK[a.state]) || ((b.lastSeen || 0) - (a.lastSeen || 0));
+    });
+    for (const p of people) {
+      const isMe = sameName(p.name, me);
+      const row = document.createElement('div');
+      row.className = 'presence-person';
+      const av = document.createElement('div');
+      av.className = 'presence-avatar';
+      av.style.background = nameColor(p.name);
+      av.textContent = (p.name || '?').trim().charAt(0).toUpperCase();
+      const dot = document.createElement('span');
+      dot.className = `dot${p.state === 'offline' ? ' offline' : ''}${p.state === 'away' ? ' away' : ''}`;
+      av.appendChild(dot);
+      const info = document.createElement('div');
+      info.className = 'presence-info';
+      const name = document.createElement('div');
+      name.className = 'presence-name';
+      name.textContent = p.name;
+      if (isMe) {
+        const you = document.createElement('span');
+        you.className = 'presence-you';
+        you.textContent = ' (você)';
+        name.appendChild(you);
+      }
+      const st = document.createElement('div');
+      st.className = 'presence-status';
+      st.dataset.state = p.state;
+      st.textContent = personStatusText(p);
+      info.append(name, st);
+      const devices = (p.devices || []);
+      if (devices.length) {
+        const ul = document.createElement('ul');
+        ul.className = 'presence-devices';
+        for (const d of devices) {
+          const li = document.createElement('li');
+          li.dataset.state = d.state;
+          li.textContent = `${d.device}${d.id === PRESENCE_CID ? ' (este aparelho)' : ''} — ${DEVICE_STATE_LABEL[d.state] || d.state}`;
+          ul.appendChild(li);
+        }
+        info.appendChild(ul);
+      }
+      row.append(av, info);
+      presenceListEl.appendChild(row);
+    }
+    const hint = document.createElement('p');
+    hint.className = 'presence-hint';
+    hint.textContent = 'Online = com a conversa aberta na tela. Ausente = conversa aberta, mas sem mexer há alguns minutos. App em segundo plano ou tela bloqueada não conta como online.';
+    presenceListEl.appendChild(hint);
+  }
+
+  function closePresencePanel() {
+    presenceOverlay.classList.add('hidden');
+  }
+  presenceBtn.addEventListener('click', () => {
+    renderPresencePanel();
+    presenceOverlay.classList.remove('hidden');
+    beatPresence();
+  });
+  presenceCloseBtn.addEventListener('click', closePresencePanel);
+  presenceOverlay.addEventListener('click', (e) => {
+    if (e.target === presenceOverlay) closePresencePanel();
+  });
+
+  // ---- backup ----
+  function fmtBytes(n) {
+    if (!n) return '0 MB';
+    if (n >= 1024 ** 3) return `${(n / 1024 ** 3).toFixed(1).replace('.', ',')} GB`;
+    if (n >= 1024 ** 2) return `${Math.max(1, Math.round(n / 1024 ** 2))} MB`;
+    return `${Math.max(1, Math.round(n / 1024))} KB`;
+  }
+
+  function fmtMonthRange(from, to) {
+    if (!from) return 'figurinhas e GIFs da coleção';
+    const f = (ts) => new Date(ts).toLocaleDateString('pt-BR', { month: 'short', year: 'numeric' }).replace(/\./g, '');
+    const a = f(from);
+    const b = f(to || from);
+    return a === b ? a : `${a} – ${b}`;
+  }
+
+  function downloadBackup(query) {
+    const a = document.createElement('a');
+    a.href = api(`/api/export${query}`);
+    a.download = '';
+    a.rel = 'noopener';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  }
+
+  function backupOption(title, sub, query) {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'backup-option';
+    const t = document.createElement('strong');
+    t.textContent = title;
+    const s = document.createElement('span');
+    s.textContent = sub;
+    btn.append(t, s);
+    btn.addEventListener('click', () => {
+      downloadBackup(query);
+      btn.classList.add('is-started');
+      s.textContent = 'Download começou — acompanhe nos downloads do navegador.';
+    });
+    return btn;
+  }
+
+  async function openBackupPanel() {
+    backupBody.replaceChildren();
+    const loading = document.createElement('p');
+    loading.className = 'backup-lead';
+    loading.textContent = 'Calculando o tamanho do backup…';
+    backupBody.appendChild(loading);
+    backupOverlay.classList.remove('hidden');
+    let plan;
+    try {
+      const r = await fetch(api('/api/export/plan'));
+      plan = await r.json();
+      if (!r.ok) throw new Error('plan');
+    } catch (e) {
+      loading.textContent = 'Não consegui calcular o backup agora. Tente de novo em instantes.';
+      return;
+    }
+    backupBody.replaceChildren();
+    const lead = document.createElement('p');
+    lead.className = 'backup-lead';
+    lead.textContent = `${plan.messages} mensagens · ${plan.files} arquivos de mídia · ${fmtBytes(plan.bytes)} no total.`;
+    const list = document.createElement('div');
+    list.className = 'backup-options';
+    list.appendChild(backupOption('Só as mensagens', 'O texto da conversa (.txt e .json) — baixa na hora.', '?only=text'));
+    const parts = plan.parts || [];
+    if (parts.length > 1) {
+      const h = document.createElement('p');
+      h.className = 'backup-heading';
+      h.textContent = 'Em partes — melhor pelo celular';
+      list.appendChild(h);
+      for (const pt of parts) {
+        list.appendChild(backupOption(
+          `Parte ${pt.part} de ${parts.length}`,
+          `${fmtMonthRange(pt.from, pt.to)} · ${pt.files} arquivos · ${fmtBytes(pt.bytes)}`,
+          `?part=${pt.part}`,
+        ));
+      }
+      const h2 = document.createElement('p');
+      h2.className = 'backup-heading';
+      h2.textContent = 'De uma vez';
+      list.appendChild(h2);
+    }
+    list.appendChild(backupOption(
+      parts.length > 1 ? 'Tudo num arquivo só' : 'Backup completo',
+      `${fmtBytes(plan.bytes)}${parts.length > 1 ? ' · melhor pelo computador' : ''}`,
+      '',
+    ));
+    const note = document.createElement('p');
+    note.className = 'backup-note';
+    note.textContent = 'Cada parte é um .zip completo: a conversa em texto + as fotos, vídeos e áudios daquele período. Mídia de visualização única nunca entra no backup.';
+    backupBody.append(lead, list, note);
+  }
+  backupClose.addEventListener('click', () => backupOverlay.classList.add('hidden'));
+  backupOverlay.addEventListener('click', (e) => {
+    if (e.target === backupOverlay) backupOverlay.classList.add('hidden');
+  });
+
+  // Esc fecha as folhas novas (antes da cadeia de Escape do resto da tela).
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    for (const ov of [heartEditorEl, editHistoryOverlay, presenceOverlay, backupOverlay]) {
+      if (ov && !ov.classList.contains('hidden')) {
+        e.stopImmediatePropagation();
+        if (ov === editHistoryOverlay) closeEditHistory();
+        else if (ov === heartEditorEl) closeHeartEditor();
+        else ov.classList.add('hidden');
+        return;
+      }
+    }
+  }, true);
+
+  // ---- cofre: adicionar fotos/vídeos do aparelho ----
+  // O túnel (Cloudflare) recusa pedido muito grande, então manda em lotes.
+  const VAULT_UPLOAD_BATCH_BYTES = 80 * 1024 * 1024;
+  let vaultUploading = false;
+
+  async function uploadToVault(files) {
+    if (!files.length || vaultUploading) return;
+    const tooBig = files.filter((f) => f.size > VAULT_UPLOAD_BATCH_BYTES);
+    const okFiles = files.filter((f) => f.size <= VAULT_UPLOAD_BATCH_BYTES);
+    const batches = [];
+    let cur = [];
+    let curBytes = 0;
+    for (const f of okFiles) {
+      if (cur.length && (curBytes + f.size > VAULT_UPLOAD_BATCH_BYTES || cur.length >= 10)) {
+        batches.push(cur);
+        cur = [];
+        curBytes = 0;
+      }
+      cur.push(f);
+      curBytes += f.size;
+    }
+    if (cur.length) batches.push(cur);
+    vaultUploading = true;
+    vaultAddBtn.disabled = true;
+    let added = 0;
+    let dup = 0;
+    let failed = tooBig.length;
+    let done = 0;
+    try {
+      for (const batch of batches) {
+        vaultAddBtn.textContent = `Guardando ${Math.min(done + batch.length, okFiles.length)}/${okFiles.length}`;
+        const form = new FormData();
+        form.append('name', myName());
+        for (const f of batch) form.append('files', f, f.name || 'foto.jpg');
+        try {
+          const r = await fetch(api('/api/vault/upload'), { method: 'POST', body: form });
+          const d = await r.json().catch(() => ({}));
+          if (!r.ok) {
+            failed += batch.length;
+            if (r.status === 401) {
+              toast(d.message || 'O cofre trancou. Abra de novo e tente outra vez.');
+              break;
+            }
+          } else {
+            added += d.added || 0;
+            dup += d.duplicates || 0;
+            failed += (d.failed || []).length;
+          }
+        } catch (e) {
+          failed += batch.length;
+        }
+        done += batch.length;
+      }
+    } finally {
+      vaultUploading = false;
+      vaultAddBtn.disabled = false;
+      vaultAddBtn.textContent = 'Adicionar';
+    }
+    const parts = [];
+    if (added) parts.push(added === 1 ? '1 guardada no cofre' : `${added} guardadas no cofre`);
+    if (dup) parts.push(dup === 1 ? '1 já estava lá' : `${dup} já estavam lá`);
+    if (failed) parts.push(failed === 1 ? '1 não deu' : `${failed} não deram`);
+    if (tooBig.length) parts.push('arquivo acima de 80 MB não passa pelo túnel');
+    toast(parts.join(' · ') || 'Nada foi guardado.', 5000);
+    if (added) refreshVault();
+  }
+
+  vaultAddBtn.addEventListener('click', () => vaultAddInput.click());
+  vaultAddInput.addEventListener('change', () => {
+    const files = Array.from(vaultAddInput.files || []);
+    vaultAddInput.value = '';
+    uploadToVault(files);
+  });
+
+  // =====================================================================
+  // Coração desenhado a dedo (só do dono do cofre)
+  //
+  // Recurso surpresa: só existe pro dono (o servidor manda `heart` no boot
+  // só pra ele, e a imagem só sai pra ele). Ele escolhe uma foto do cofre e
+  // enquadra dentro do coração; quando desenha um coração com o dedo (ou o
+  // mouse) por cima da conversa, aparece uma animação rápida (~3s) com a
+  // foto dentro - só na tela dele.
+  // =====================================================================
+  const HEART_PATH = 'M50 86 C 22 66 3 50 3 29 C 3 14 14 3 28 3 C 38 3 46 9 50 18 C 54 9 62 3 72 3 C 86 3 97 14 97 29 C 97 50 78 66 50 86 Z';
+  const HEART_FX_MS = 3000;
+  const heartEditorEl = document.getElementById('heart-editor');
+  const heartStage = document.getElementById('heart-stage');
+  const heartStageImg = document.getElementById('heart-stage-img');
+  const heartZoom = document.getElementById('heart-zoom');
+  const heartCenterBtn = document.getElementById('heart-center');
+  const heartTestBtn = document.getElementById('heart-test');
+  const heartRemoveBtn = document.getElementById('heart-remove');
+  const heartCancelBtn = document.getElementById('heart-cancel');
+  const heartSaveBtn = document.getElementById('heart-save');
+  const heartFxEl = document.getElementById('heart-fx');
+
+  let heartEnabled = false;
+  let heartPhotoInfo = null; // { v, by }
+  let heartPhotoUrl = null;  // blob: da foto recortada
+
+  function applyHeartConfig(cfg) {
+    heartEnabled = !!cfg;
+    const info = cfg && cfg.photo;
+    if (!info) {
+      heartPhotoInfo = null;
+      if (heartPhotoUrl) URL.revokeObjectURL(heartPhotoUrl);
+      heartPhotoUrl = null;
+      return;
+    }
+    if (heartPhotoInfo && heartPhotoInfo.v === info.v && heartPhotoUrl) return;
+    heartPhotoInfo = info;
+    fetchHeartPhoto();
+  }
+
+  async function fetchHeartPhoto() {
+    try {
+      const r = await fetch(api(`/api/heart-photo?name=${encodeURIComponent(myName())}`));
+      if (!r.ok) return;
+      const blob = await r.blob();
+      if (heartPhotoUrl) URL.revokeObjectURL(heartPhotoUrl);
+      heartPhotoUrl = URL.createObjectURL(blob);
+    } catch (e) {
+      // sem rede: a animação sai com o coração sem foto
+    }
+  }
+
+  let heartFxTimer = null;
+  function playHeartFx(photoUrl) {
+    const url = photoUrl || heartPhotoUrl;
+    clearTimeout(heartFxTimer);
+    heartFxEl.replaceChildren();
+    const inner = document.createElement('div');
+    inner.className = 'heart-fx-inner';
+    const img = url
+      ? `<image href="${url}" x="0" y="0" width="100" height="90" preserveAspectRatio="xMidYMid slice" clip-path="url(#heartFxClip)"/>`
+      : '';
+    inner.innerHTML = `<svg class="heart-fx-svg" viewBox="0 0 100 90" aria-hidden="true">
+      <defs>
+        <clipPath id="heartFxClip"><path d="${HEART_PATH}"/></clipPath>
+        <linearGradient id="heartFxGrad" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0" stop-color="#ff86b0"/><stop offset="1" stop-color="#e2456f"/>
+        </linearGradient>
+      </defs>
+      <path d="${HEART_PATH}" fill="url(#heartFxGrad)"/>
+      ${img}
+      <path d="${HEART_PATH}" fill="none" stroke="#fff" stroke-width="2.4" stroke-opacity="0.92" stroke-linejoin="round"/>
+    </svg>`;
+    heartFxEl.appendChild(inner);
+    const count = 14;
+    for (let i = 0; i < count; i++) {
+      const sp = document.createElement('span');
+      sp.className = 'heart-particle';
+      sp.textContent = '♥';
+      const ang = (i / count) * Math.PI * 2 + (Math.random() - 0.5) * 0.4;
+      const dist = 130 + Math.random() * 110;
+      sp.style.setProperty('--dx', `${Math.round(Math.cos(ang) * dist)}px`);
+      sp.style.setProperty('--dy', `${Math.round(Math.sin(ang) * dist - 30)}px`);
+      sp.style.setProperty('--s', `${Math.round(12 + Math.random() * 14)}px`);
+      sp.style.setProperty('--d', `${(0.15 + Math.random() * 0.35).toFixed(2)}s`);
+      sp.style.setProperty('--r', `${Math.round((Math.random() - 0.5) * 60)}deg`);
+      heartFxEl.appendChild(sp);
+    }
+    heartFxEl.classList.remove('hidden');
+    try { if (navigator.vibrate) navigator.vibrate(25); } catch (e) { /* tudo bem */ }
+    heartFxTimer = setTimeout(() => {
+      heartFxEl.classList.add('hidden');
+      heartFxEl.replaceChildren();
+    }, HEART_FX_MS);
+  }
+
+  // ---- reconhecer o coração ----
+  // O traço vira 64 pontos, é esticado pra caber num quadrado e comparado
+  // com um coração de referência começando de qualquer ponto, nos dois
+  // sentidos. Também exige tamanho mínimo e traço (quase) fechado - rolar a
+  // conversa, círculo, quadrado e oito não passam.
+  const HEART_N = 64;
+  function heartResample(pts, n) {
+    let len = 0;
+    for (let i = 1; i < pts.length; i++) len += Math.hypot(pts[i].x - pts[i - 1].x, pts[i].y - pts[i - 1].y);
+    const step = len / (n - 1);
+    const out = [pts[0]];
+    let acc = 0;
+    let prev = pts[0];
+    for (let i = 1; i < pts.length; i++) {
+      const cur = pts[i];
+      let d = Math.hypot(cur.x - prev.x, cur.y - prev.y);
+      while (acc + d >= step && out.length < n && d > 0) {
+        const t = (step - acc) / d;
+        const q = { x: prev.x + t * (cur.x - prev.x), y: prev.y + t * (cur.y - prev.y) };
+        out.push(q);
+        prev = q;
+        d = Math.hypot(cur.x - prev.x, cur.y - prev.y);
+        acc = 0;
+      }
+      acc += d;
+      prev = cur;
+    }
+    while (out.length < n) out.push(pts[pts.length - 1]);
+    return out;
+  }
+  function heartNormalize(pts) {
+    let minX = Infinity; let minY = Infinity; let maxX = -Infinity; let maxY = -Infinity;
+    for (const p of pts) {
+      minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
+      minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
+    }
+    const w = maxX - minX || 1;
+    const h = maxY - minY || 1;
+    return pts.map((p) => ({ x: (p.x - minX) / w, y: (p.y - minY) / h }));
+  }
+  const HEART_TEMPLATE = (() => {
+    const raw = [];
+    for (let i = 0; i < 400; i++) {
+      const t = (i / 400) * Math.PI * 2;
+      raw.push({
+        x: 16 * Math.sin(t) ** 3,
+        y: -(13 * Math.cos(t) - 5 * Math.cos(2 * t) - 2 * Math.cos(3 * t) - Math.cos(4 * t)),
+      });
+    }
+    raw.push(raw[0]);
+    return heartNormalize(heartResample(raw, HEART_N));
+  })();
+  function looksLikeHeart(points) {
+    if (points.length < 12) return false;
+    let minX = Infinity; let minY = Infinity; let maxX = -Infinity; let maxY = -Infinity;
+    for (const p of points) {
+      minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
+      minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
+    }
+    const w = maxX - minX;
+    const h = maxY - minY;
+    if (w < 70 || h < 70) return false;
+    const ratio = w / h;
+    if (ratio < 0.55 || ratio > 2.2) return false;
+    const first = points[0];
+    const last = points[points.length - 1];
+    if (Math.hypot(first.x - last.x, first.y - last.y) / Math.hypot(w, h) > 0.3) return false;
+    const path = heartNormalize(heartResample(points.concat([first]), HEART_N));
+    const M = HEART_N - 1;
+    let best = Infinity;
+    for (const dir of [1, -1]) {
+      for (let shift = 0; shift < M; shift++) {
+        let sum = 0;
+        for (let i = 0; i < M; i++) {
+          const j = ((dir === 1 ? i : M - i) + shift + M) % M;
+          sum += Math.hypot(path[i].x - HEART_TEMPLATE[j].x, path[i].y - HEART_TEMPLATE[j].y);
+          if (sum / M >= best) break;
+        }
+        best = Math.min(best, sum / M);
+      }
+    }
+    return best < 0.085;
+  }
+
+  // ---- capturar o traço por cima da conversa ----
+  const heartTrack = { pts: [], t0: 0, active: false };
+  function heartStart(x, y) {
+    if (!heartEnabled) return;
+    heartTrack.pts = [{ x, y }];
+    heartTrack.t0 = performance.now();
+    heartTrack.active = true;
+  }
+  function heartMove(x, y) {
+    if (!heartTrack.active) return;
+    const p = heartTrack.pts;
+    const l = p[p.length - 1];
+    if (Math.abs(x - l.x) + Math.abs(y - l.y) < 3) return;
+    p.push({ x, y });
+    if (p.length > 800) heartTrack.active = false;
+  }
+  function heartEnd() {
+    if (!heartTrack.active) return;
+    heartTrack.active = false;
+    const dt = performance.now() - heartTrack.t0;
+    if (dt < 250 || dt > 6000) return;
+    if (looksLikeHeart(heartTrack.pts)) playHeartFx();
+  }
+  messagesEl.addEventListener('touchstart', (e) => {
+    if (e.touches.length !== 1) { heartTrack.active = false; return; }
+    heartStart(e.touches[0].clientX, e.touches[0].clientY);
+  }, { passive: true });
+  messagesEl.addEventListener('touchmove', (e) => {
+    if (e.touches.length !== 1) { heartTrack.active = false; return; }
+    heartMove(e.touches[0].clientX, e.touches[0].clientY);
+  }, { passive: true });
+  messagesEl.addEventListener('touchend', heartEnd, { passive: true });
+  messagesEl.addEventListener('touchcancel', heartEnd, { passive: true });
+  messagesEl.addEventListener('pointerdown', (e) => {
+    if (e.pointerType === 'mouse' && e.button === 0) heartStart(e.clientX, e.clientY);
+  });
+  window.addEventListener('pointermove', (e) => {
+    if (e.pointerType === 'mouse' && (e.buttons & 1)) heartMove(e.clientX, e.clientY);
+  });
+  window.addEventListener('pointerup', (e) => {
+    if (e.pointerType === 'mouse') heartEnd();
+  });
+
+  // ---- editor: enquadrar a foto dentro do coração ----
+  // Estado em pixels do palco: o centro da imagem fica deslocado (ox, oy)
+  // do centro do palco; zoom 1 = a imagem cobrindo o palco inteiro.
+  const HE = { itemId: null, nw: 0, nh: 0, zoom: 1, ox: 0, oy: 0, W: 0, H: 0 };
+  const hePointers = new Map();
+  let heGesture = null;
+
+  function heBase() {
+    return Math.max(HE.W / HE.nw, HE.H / HE.nh);
+  }
+  function heMeasure() {
+    const r = heartStage.getBoundingClientRect();
+    const rx = HE.W ? HE.ox / HE.W : 0;
+    const ry = HE.H ? HE.oy / HE.H : 0;
+    HE.W = r.width;
+    HE.H = r.height;
+    HE.ox = rx * HE.W;
+    HE.oy = ry * HE.H;
+  }
+  function heLayout() {
+    if (!HE.nw || !HE.W) return;
+    const s = heBase() * HE.zoom;
+    const maxX = Math.max(0, (HE.nw * s - HE.W) / 2);
+    const maxY = Math.max(0, (HE.nh * s - HE.H) / 2);
+    HE.ox = Math.min(maxX, Math.max(-maxX, HE.ox));
+    HE.oy = Math.min(maxY, Math.max(-maxY, HE.oy));
+    heartStageImg.style.width = `${HE.nw * s}px`;
+    heartStageImg.style.height = `${HE.nh * s}px`;
+    heartStageImg.style.transform = `translate(-50%, -50%) translate(${HE.ox}px, ${HE.oy}px)`;
+    heartZoom.value = String(HE.zoom);
+  }
+  // Zoom mantendo parado o ponto (cx, cy), em px a partir do centro do palco.
+  function heSetZoom(z, cx, cy) {
+    const nz = Math.min(5, Math.max(1, z));
+    const k = nz / HE.zoom;
+    HE.ox = cx - (cx - HE.ox) * k;
+    HE.oy = cy - (cy - HE.oy) * k;
+    HE.zoom = nz;
+    heLayout();
+  }
+
+  async function openHeartEditor(item) {
+    HE.itemId = item.id;
+    HE.nw = 0;
+    HE.nh = 0;
+    HE.zoom = 1;
+    HE.ox = 0;
+    HE.oy = 0;
+    HE.W = 0;
+    heartSaveBtn.disabled = true;
+    heartTestBtn.disabled = true;
+    heartRemoveBtn.classList.toggle('hidden', !heartPhotoInfo);
+    heartStageImg.removeAttribute('style');
+    heartStageImg.removeAttribute('src');
+    heartEditorEl.classList.remove('hidden');
+    let saved = null;
+    try {
+      const r = await fetch(api(`/api/heart-photo/crop?name=${encodeURIComponent(myName())}`));
+      if (r.ok) {
+        const d = await r.json();
+        if (d.crop && d.crop.itemId === item.id) saved = d.crop;
+      }
+    } catch (e) { /* começa centralizado */ }
+    heartStageImg.onload = () => {
+      HE.nw = heartStageImg.naturalWidth;
+      HE.nh = heartStageImg.naturalHeight;
+      heMeasure();
+      if (saved) {
+        HE.zoom = Math.min(5, Math.max(1, Number(saved.zoom) || 1));
+        HE.ox = (Number(saved.x) || 0) * HE.W;
+        HE.oy = (Number(saved.y) || 0) * HE.H;
+      }
+      heLayout();
+      heartSaveBtn.disabled = false;
+      heartTestBtn.disabled = false;
+    };
+    heartStageImg.onerror = () => toast('Não consegui abrir essa foto.');
+    heartStageImg.src = api(`/api/vault/file/${item.id}`);
+  }
+
+  function closeHeartEditor() {
+    heartEditorEl.classList.add('hidden');
+    hePointers.clear();
+    heGesture = null;
+    heartStageImg.removeAttribute('src');
+  }
+
+  heartStage.addEventListener('pointerdown', (e) => {
+    if (!HE.nw) return;
+    heartStage.setPointerCapture(e.pointerId);
+    hePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    heGesture = null;
+  });
+  heartStage.addEventListener('pointermove', (e) => {
+    if (!hePointers.has(e.pointerId)) return;
+    const prev = hePointers.get(e.pointerId);
+    hePointers.set(e.pointerId, { x: e.clientX, y: e.clientY });
+    if (hePointers.size === 1) {
+      HE.ox += e.clientX - prev.x;
+      HE.oy += e.clientY - prev.y;
+      heLayout();
+      return;
+    }
+    // Pinça: distância entre os dois dedos dá o zoom, o ponto do meio arrasta.
+    const [a, b] = [...hePointers.values()];
+    const r = heartStage.getBoundingClientRect();
+    const mid = { x: (a.x + b.x) / 2 - (r.left + r.width / 2), y: (a.y + b.y) / 2 - (r.top + r.height / 2) };
+    const dist = Math.hypot(a.x - b.x, a.y - b.y);
+    if (heGesture) {
+      HE.ox += mid.x - heGesture.mid.x;
+      HE.oy += mid.y - heGesture.mid.y;
+      if (heGesture.dist > 0) heSetZoom(HE.zoom * (dist / heGesture.dist), mid.x, mid.y);
+      else heLayout();
+    }
+    heGesture = { mid, dist };
+  });
+  const heRelease = (e) => {
+    hePointers.delete(e.pointerId);
+    heGesture = null;
+  };
+  heartStage.addEventListener('pointerup', heRelease);
+  heartStage.addEventListener('pointercancel', heRelease);
+  heartStage.addEventListener('wheel', (e) => {
+    if (!HE.nw) return;
+    e.preventDefault();
+    const r = heartStage.getBoundingClientRect();
+    heSetZoom(HE.zoom * Math.exp(-e.deltaY * 0.0015), e.clientX - (r.left + r.width / 2), e.clientY - (r.top + r.height / 2));
+  }, { passive: false });
+  heartZoom.addEventListener('input', () => heSetZoom(parseFloat(heartZoom.value) || 1, 0, 0));
+  heartCenterBtn.addEventListener('click', () => {
+    HE.zoom = 1;
+    HE.ox = 0;
+    HE.oy = 0;
+    heLayout();
+  });
+  window.addEventListener('resize', () => {
+    if (heartEditorEl.classList.contains('hidden') || !HE.nw) return;
+    heMeasure();
+    heLayout();
+  });
+
+  // Desenha o enquadramento atual num canvas do tamanho do coração (600x540).
+  function heRender() {
+    return new Promise((resolve) => {
+      const OW = 600;
+      const OH = 540;
+      const canvas = document.createElement('canvas');
+      canvas.width = OW;
+      canvas.height = OH;
+      const ctx = canvas.getContext('2d');
+      const k = OW / HE.W;
+      const s = heBase() * HE.zoom * k;
+      ctx.fillStyle = '#000';
+      ctx.fillRect(0, 0, OW, OH);
+      ctx.drawImage(heartStageImg, OW / 2 + HE.ox * k - (HE.nw * s) / 2, OH / 2 + HE.oy * k - (HE.nh * s) / 2, HE.nw * s, HE.nh * s);
+      canvas.toBlob((b) => resolve(b), 'image/jpeg', 0.9);
+    });
+  }
+
+  heartTestBtn.addEventListener('click', async () => {
+    const blob = await heRender();
+    if (!blob) return;
+    const url = URL.createObjectURL(blob);
+    playHeartFx(url);
+    setTimeout(() => URL.revokeObjectURL(url), HEART_FX_MS + 500);
+  });
+
+  heartSaveBtn.addEventListener('click', async () => {
+    if (!HE.nw) return;
+    heartSaveBtn.disabled = true;
+    try {
+      const blob = await heRender();
+      if (!blob) throw new Error('render');
+      const form = new FormData();
+      form.append('name', myName());
+      form.append('crop', JSON.stringify({ itemId: HE.itemId, x: HE.ox / HE.W, y: HE.oy / HE.H, zoom: HE.zoom }));
+      form.append('photo', blob, 'coracao.jpg');
+      const r = await fetch(api('/api/heart-photo'), { method: 'POST', body: form });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.message || 'Não consegui salvar.');
+      heartPhotoInfo = d.photo || null;
+      if (heartPhotoUrl) URL.revokeObjectURL(heartPhotoUrl);
+      heartPhotoUrl = URL.createObjectURL(blob);
+      closeHeartEditor();
+      closeVaultPreview();
+      toast('Pronto! Desenhe um coração com o dedo na conversa. ♥', 4000);
+    } catch (e) {
+      toast(e.message === 'render' ? 'Não consegui preparar a foto.' : e.message);
+    } finally {
+      heartSaveBtn.disabled = false;
+    }
+  });
+
+  heartRemoveBtn.addEventListener('click', async () => {
+    const ok = await askConfirm('Tirar a foto do coração? A animação continua, só que sem foto.', 'Tirar');
+    if (!ok) return;
+    try {
+      const r = await fetch(api('/api/heart-photo/remove'), {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: myName() }),
+      });
+      if (!r.ok) throw new Error();
+      applyHeartConfig({ photo: null });
+      closeHeartEditor();
+      toast('Foto tirada do coração.');
+    } catch (e) {
+      toast('Não consegui tirar agora.');
+    }
+  });
+
+  heartCancelBtn.addEventListener('click', closeHeartEditor);
+  vaultPreviewHeart.addEventListener('click', () => {
+    if (vaultPreviewItem) openHeartEditor(vaultPreviewItem);
+  });
+
 
   checkAuth();
 })();

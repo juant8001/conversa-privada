@@ -10,6 +10,8 @@ const zlib = require('zlib');
 const express = require('express');
 const multer = require('multer');
 const archiver = require('archiver');
+const { Presence } = require('./lib/presence');
+const { loadChangelog } = require('./lib/changelog');
 const { EventEmitter } = require('events');
 
 const { Store, WrongCodeError } = require('./lib/store');
@@ -151,11 +153,96 @@ bus.setMaxListeners(50);
 // the expiry catches up a little late instead of never happening.
 const pendingExpiry = new Map();
 
-// Presence tracking, in-memory only (mirrors the "invalida a cada restart"
-// spirit of sessions/pendingExpiry above): connectionId -> name, one entry
-// per open SSE stream. Used only to answer "a outra pessoa esta online
-// agora" - never persisted, never exposed outside /api/stream.
-const onlineConnections = new Map();
+// Presença (v54): quem está com a conversa aberta NA TELA agora, por
+// batidas de cada aba - ver lib/presence.js. Em memória, como as sessões;
+// só o "visto por último" é guardado (cifrado, em data.presence) quando
+// alguém sai do online, pra sobreviver a um restart.
+const PRESENCE_STALE_MS = parseInt(process.env.PRESENCE_STALE_MS || '50000', 10);
+let presenceLoaded = false;
+const presence = new Presence({
+  staleMs: PRESENCE_STALE_MS,
+  onChange: (snap) => bus.emit('presence', snap),
+  onWentOffline: (key) => persistLastSeen(key),
+});
+setInterval(() => presence.sweep(), Math.min(5000, PRESENCE_STALE_MS)).unref();
+
+// Trecho síncrono (sem await entre ler e gravar), igual às rotas.
+function persistLastSeen(key) {
+  try {
+    const data = loadStoreByKey(key);
+    data.presence = { lastSeen: presence.lastSeenObject() };
+    store.persist(key, data);
+  } catch (e) {
+    console.error('Falha ao guardar o visto por último', e.message);
+  }
+}
+
+function ensurePresenceLoaded(key) {
+  if (presenceLoaded) return;
+  presenceLoaded = true;
+  try {
+    const data = loadStoreByKey(key);
+    presence.loadLastSeen(data.presence && data.presence.lastSeen);
+  } catch (e) {
+    // sem visto por último guardado: tudo bem
+  }
+}
+
+function loadStoreByKey(key) {
+  const blob = fs.readFileSync(store.storePath);
+  const { decryptBuffer } = require('./lib/crypto');
+  return JSON.parse(decryptBuffer(key, blob).toString('utf8'));
+}
+
+// Visualização única de VÍDEO (v54): os 10s (EPHEMERAL_TTL_MS) contados da
+// abertura cortavam qualquer vídeo mais longo no meio - o arquivo sumia do
+// disco e o Safari, que busca o vídeo em pedaços (Range), levava 404 no
+// pedaço seguinte. Agora a janela de um vídeo cobre a duração inteira (com
+// folga pra carregar/pausar), e o cliente avisa quando o vídeo terminou ou
+// foi fechado (POST .../view-done) pra ele sumir na hora. Sem duração
+// conhecida (vídeo antigo, ou o navegador não conseguiu medir), vale um
+// teto fixo - o view-done continua encerrando antes.
+const EPHEMERAL_VIDEO_FALLBACK_MS = parseInt(process.env.EPHEMERAL_VIDEO_FALLBACK_MS || String(30 * 60 * 1000), 10);
+const EPHEMERAL_VIDEO_MAX_MS = 3 * 60 * 60 * 1000;
+function ephemeralWindowMs(msg) {
+  if (msg.type !== 'video') return EPHEMERAL_TTL_MS;
+  const d = Number(msg.duration);
+  if (Number.isFinite(d) && d > 0) {
+    return Math.min(Math.max(EPHEMERAL_TTL_MS, Math.round(d * 1000 * 1.5) + 60000), EPHEMERAL_VIDEO_MAX_MS);
+  }
+  return Math.max(EPHEMERAL_TTL_MS, EPHEMERAL_VIDEO_FALLBACK_MS);
+}
+
+// Changelog no chat (v54): ver lib/changelog.js. Roda dentro do
+// loadWithSessionKey, ou seja, na primeira leitura autenticada depois de um
+// deploy. Conversa novinha (store recém-criado, sem mensagem nenhuma) só
+// marca a versão, sem cartão.
+function announceChangelog(key, data) {
+  const list = loadChangelog();
+  const latest = list[0];
+  if (!latest || !latest.version || data.changelogVersion === latest.version) return;
+  const seenAt = list.findIndex((e) => e.version === data.changelogVersion);
+  const fresh = !data.changelogVersion && !(data.messages || []).length;
+  data.changelogVersion = latest.version;
+  // Versões que ainda não apareceram, da mais antiga pra mais nova. Sem
+  // registro de versão (primeira vez com changelog), só a mais recente.
+  const pending = fresh ? [] : (seenAt > 0 ? list.slice(0, seenAt) : [latest]).reverse();
+  const now = Date.now();
+  const added = pending.map((e, i) => ({
+    id: randomId(8),
+    type: 'system',
+    kind: 'changelog',
+    sender: 'Sistema',
+    version: String(e.version).slice(0, 20),
+    title: String(e.title || '').slice(0, 200),
+    items: (Array.isArray(e.items) ? e.items : []).map((t) => String(t).slice(0, 600)).slice(0, 20),
+    date: e.date,
+    ts: now + i,
+  }));
+  data.messages.push(...added);
+  store.persist(key, data);
+  for (const m of added) bus.emit('message', m);
+}
 
 // Best-effort Open Graph preview for a link pasted into a text message.
 // Deliberately runs AFTER the message is already saved/broadcast (see the
@@ -358,6 +445,7 @@ function expireEphemeralMessage(data, msg) {
   delete msg.filename;
   delete msg.mimeType;
   delete msg.size;
+  delete msg.duration;
 }
 
 function scheduleExpiry(sessionKey, msgId, delayMs) {
@@ -392,7 +480,7 @@ function reconcileEphemeral(sessionKey, data) {
   let changed = false;
   for (const msg of data.messages) {
     if (!msg.ephemeral || msg.deleted || !msg.viewedAt) continue;
-    const remaining = EPHEMERAL_TTL_MS - (Date.now() - msg.viewedAt);
+    const remaining = (msg.viewWindowMs || EPHEMERAL_TTL_MS) - (Date.now() - msg.viewedAt);
     if (remaining <= 0) {
       expireEphemeralMessage(data, msg);
       changed = true;
@@ -412,7 +500,7 @@ function reconcileEphemeral(sessionKey, data) {
 // endpoint either.
 function sanitizeMessage(msg) {
   if (msg.ephemeral && !msg.deleted) {
-    const { mediaId, thumbId, filename, mimeType, size, width, height, ...rest } = msg;
+    const { mediaId, thumbId, filename, mimeType, size, width, height, duration, ...rest } = msg;
     return rest;
   }
   return msg;
@@ -664,6 +752,7 @@ function requireAuth(req, res, next) {
 function loadWithSessionKey(req) {
   const data = loadStoreOnly(req);
   reconcileEphemeral(req.session.key, data);
+  announceChangelog(req.session.key, data);
   return data;
 }
 
@@ -900,6 +989,11 @@ roomRouter.post('/api/media', requireAuth, uploadMediaFields, async (req, res) =
   // upload (mirrors how ephemeral is parsed just below).
   const mediaWidth = parseDimension(req.body && req.body.width);
   const mediaHeight = parseDimension(req.body && req.body.height);
+  // Duração do vídeo (segundos), medida no navegador antes do envio - é o
+  // que dá o tamanho da janela da visualização única (ephemeralWindowMs).
+  const rawDuration = parseFloat(req.body && req.body.duration);
+  const mediaDuration = Number.isFinite(rawDuration) && rawDuration > 0 && rawDuration < 86400
+    ? Math.round(rawDuration * 10) / 10 : undefined;
   let mime = file.mimetype || 'application/octet-stream';
   let type = 'file';
   if (mime.startsWith('image/')) type = 'image';
@@ -936,6 +1030,7 @@ roomRouter.post('/api/media', requireAuth, uploadMediaFields, async (req, res) =
       message.width = mediaWidth;
       message.height = mediaHeight;
     }
+    if (type === 'video' && mediaDuration) message.duration = mediaDuration;
     // Marca GIF pra bolha ganhar o selo e o menu oferecer "Salvar nos GIFs".
     if (mime === 'image/gif') message.gif = true;
     // "Visualização única" only makes sense for something you actually
@@ -997,12 +1092,96 @@ roomRouter.post('/api/messages/:id/view', requireAuth, express.json(), (req, res
     }
     if (!msg.viewedAt) {
       msg.viewedAt = Date.now();
+      msg.viewWindowMs = ephemeralWindowMs(msg);
       store.persist(req.session.key, data);
-      scheduleExpiry(req.session.key, msg.id, EPHEMERAL_TTL_MS);
+      scheduleExpiry(req.session.key, msg.id, msg.viewWindowMs);
       bus.emit('message-viewed', { id: msg.id, viewedAt: msg.viewedAt });
     }
-    const remainingMs = Math.max(EPHEMERAL_TTL_MS - (Date.now() - msg.viewedAt), 0);
-    res.json({ ok: true, message: msg, remainingMs });
+    const windowMs = msg.viewWindowMs || EPHEMERAL_TTL_MS;
+    const remainingMs = Math.max(windowMs - (Date.now() - msg.viewedAt), 0);
+    // Vídeo: o cliente não mostra contagem de segundos; ele encerra quando o
+    // vídeo acaba ou é fechado (view-done). remainingMs vira só o teto.
+    res.json({ ok: true, message: msg, remainingMs, closesOnEnd: msg.type === 'video' });
+  } catch (e) {
+    console.error(e);
+    res.status(401).json({ error: 'unauthenticated' });
+  }
+});
+
+// Quem abriu a visualização única terminou de ver (o vídeo acabou, fechou,
+// saiu da página): some agora, sem esperar o resto da janela. Só quem
+// recebeu pode encerrar (é a mesma pessoa que pôde abrir).
+roomRouter.post('/api/messages/:id/view-done', requireAuth, express.json({ type: ['application/json', 'text/plain'] }), (req, res) => {
+  let body = req.body || {};
+  if (typeof body === 'string') {
+    try { body = JSON.parse(body); } catch (e) { body = {}; }
+  }
+  const { requesterName } = body;
+  if (!requesterName || !String(requesterName).trim()) {
+    return res.status(400).json({ error: 'invalid' });
+  }
+  try {
+    const data = loadWithSessionKey(req);
+    const msg = data.messages.find((m) => m.id === req.params.id);
+    if (!msg) return res.status(404).json({ error: 'not_found' });
+    if (!msg.ephemeral) return res.status(400).json({ error: 'not_ephemeral' });
+    if (msg.deleted) return res.json({ ok: true });
+    if (sameSender(msg.sender, requesterName)) return res.status(403).json({ error: 'forbidden' });
+    if (!msg.viewedAt) return res.status(409).json({ error: 'not_viewed' });
+    const handle = pendingExpiry.get(msg.id);
+    if (handle) clearTimeout(handle);
+    pendingExpiry.delete(msg.id);
+    expireEphemeralMessage(data, msg);
+    store.persist(req.session.key, data);
+    bus.emit('message-deleted', { id: msg.id, sender: msg.sender, deletedAt: msg.deletedAt, expiredEphemeral: true });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error(e);
+    res.status(401).json({ error: 'unauthenticated' });
+  }
+});
+
+// Editar uma mensagem de texto já enviada (v54). Só quem mandou edita.
+// A versão anterior não some: vai pra msg.edits ([{ text, ts }], da mais
+// antiga pra mais nova, ts = quando aquela versão passou a valer), e a
+// bolha mostra "editada" com o histórico pra qualquer um dos dois ver o que
+// mudou. Citações (replyTo) continuam com o trecho de quando foram feitas.
+const MAX_EDIT_HISTORY = 30;
+roomRouter.post('/api/messages/:id/edit', requireAuth, express.json(), (req, res) => {
+  const { requesterName, text } = req.body || {};
+  if (!requesterName || !String(requesterName).trim() || !text || !String(text).trim()) {
+    return res.status(400).json({ error: 'invalid' });
+  }
+  const newText = String(text).trim().slice(0, 8000);
+  try {
+    const data = loadWithSessionKey(req);
+    const msg = data.messages.find((m) => m.id === req.params.id);
+    if (!msg) return res.status(404).json({ error: 'not_found' });
+    if (msg.deleted) return res.status(410).json({ error: 'deleted', message: 'Essa mensagem foi apagada.' });
+    if (msg.type !== 'text') return res.status(400).json({ error: 'not_text', message: 'Só dá pra editar mensagem de texto.' });
+    if (!sameSender(msg.sender, requesterName)) {
+      return res.status(403).json({ error: 'forbidden', message: 'Só quem mandou pode editar a mensagem.' });
+    }
+    if (newText === msg.text) return res.json({ ok: true, message: sanitizeMessage(msg) });
+    const edits = Array.isArray(msg.edits) ? msg.edits : [];
+    edits.push({ text: msg.text, ts: msg.editedAt || msg.ts });
+    // Teto do histórico: a versão original (a primeira) fica sempre.
+    while (edits.length > MAX_EDIT_HISTORY) edits.splice(1, 1);
+    msg.edits = edits;
+    msg.text = newText;
+    msg.editedAt = Date.now();
+    const hadPreview = !!msg.linkPreview;
+    delete msg.linkPreview;
+    store.persist(req.session.key, data);
+    const payload = {
+      id: msg.id, text: msg.text, editedAt: msg.editedAt, edits: msg.edits, linkPreview: null,
+    };
+    bus.emit('message-edited', payload);
+    res.json({ ok: true, message: sanitizeMessage(msg), hadPreview });
+    const linkMatch = msg.text.match(URL_IN_TEXT_RE);
+    if (linkMatch) {
+      scheduleLinkPreview(req.session.key, msg.id, stripTrailingPunctuationServer(linkMatch[0])).catch(() => {});
+    }
   } catch (e) {
     console.error(e);
     res.status(401).json({ error: 'unauthenticated' });
@@ -1037,6 +1216,9 @@ roomRouter.post('/api/messages/:id/delete', requireAuth, (req, res) => {
     msg.deletedBy = deletedBy;
     delete msg.starredBy;
     delete msg.reactions;
+    delete msg.edits;
+    delete msg.editedAt;
+    delete msg.linkPreview;
     delete msg.text;
     delete msg.mediaId;
     delete msg.thumbId;
@@ -1184,6 +1366,8 @@ roomRouter.get('/api/boot', requireAuth, (req, res) => {
       stickerTools: stickerTools.available(),
       waImport: waImportOpen(),
       vault: vault.enabled() && vault.isOwner(req.query && req.query.name),
+      // Só pro dono (recurso surpresa, ver "Coração desenhado a dedo").
+      heart: vault.enabled() && vault.isOwner(req.query && req.query.name) ? { photo: heartPublic(data) } : null,
       hermes: HERMES_HASH ? { salt: HERMES_SALT, hash: HERMES_HASH } : null,
     });
   } catch (e) {
@@ -1912,6 +2096,141 @@ roomRouter.get('/api/vault/file/:id', requireAuth, (req, res) => {
 // Manda as escolhidas na conversa: cada uma vira uma mensagem normal (a
 // mídia é decifrada com a chave do cofre e cifrada de novo com a da
 // conversa, como qualquer envio). Até 10 por vez.
+// Mandar fotos/vídeos do aparelho direto pro cofre (v54). Só o dono, com o
+// cofre aberto nesta sessão. Um por vez, em sequência (a conversão de HEIC e
+// a miniatura chamam sips/ffmpeg).
+const uploadVault = upload.array('files', 20);
+roomRouter.post('/api/vault/upload', requireAuth, uploadVault, async (req, res) => {
+  if (!vaultOwnerGate(res, req.body && req.body.name)) return;
+  const key = vaultKeyOr401(req, res);
+  if (!key) return;
+  const files = Array.isArray(req.files) ? req.files : [];
+  if (!files.length) return res.status(400).json({ error: 'invalid', message: 'Nenhum arquivo.' });
+  let added = 0;
+  let duplicates = 0;
+  const failed = [];
+  for (const f of files) {
+    try {
+      const out = await vault.addUpload(key, f.originalname, f.mimetype, f.buffer);
+      if (out.duplicate) duplicates += 1;
+      else added += 1;
+    } catch (e) {
+      failed.push({ name: String(f.originalname || '').slice(0, 80), message: e.user ? e.message : 'Não deu pra guardar.' });
+      if (!e.user) console.error('cofre upload:', e && e.message);
+    }
+  }
+  res.json({ ok: true, added, duplicates, failed });
+});
+
+// ---------------------------------------------------------------------
+// Coração desenhado a dedo (v54)
+//
+// Recurso só do dono do cofre (VAULT_OWNER), de surpresa: fica fora do
+// changelog e nada dele chega ao outro lado (nem evento de SSE, nem campo
+// no boot, nem a rota da imagem). O dono escolhe uma foto do cofre e
+// recorta/centraliza ela dentro de um coração (o recorte é feito no
+// navegador, num <canvas>); quando ELE desenha um coração a dedo na
+// conversa, a animação aparece só na tela dele, com essa foto dentro.
+// A foto recortada fica como um blob cifrado em data/media (assim a
+// animação funciona mesmo com o cofre trancado), mas só é servida pro dono.
+// data.heartPhoto = { mediaId, by, ts, crop } - crop guarda de qual item do
+// cofre veio e o enquadramento, pra reabrir o editor do mesmo jeito.
+// ---------------------------------------------------------------------
+const MAX_HEART_BYTES = 3 * 1024 * 1024;
+const uploadHeart = upload.single('photo');
+
+function heartPublic(data) {
+  const h = data.heartPhoto;
+  if (!h || !h.mediaId || !store.mediaExists(h.mediaId)) return null;
+  return { v: h.ts, by: h.by };
+}
+
+roomRouter.get('/api/heart-photo', requireAuth, (req, res) => {
+  if (!vaultOwnerGate(res, req.query && req.query.name)) return;
+  try {
+    const data = loadStoreOnly(req);
+    const h = data.heartPhoto;
+    if (!h || !h.mediaId || !store.mediaExists(h.mediaId)) return res.status(404).end();
+    const buf = store.loadMedia(req.session.key, h.mediaId);
+    res.setHeader('Content-Type', h.mimeType || 'image/jpeg');
+    res.setHeader('Content-Disposition', 'inline; filename="coracao.jpg"');
+    res.setHeader('Content-Security-Policy', MEDIA_CSP);
+    res.setHeader('Cache-Control', 'private, no-store');
+    res.send(buf);
+  } catch (e) {
+    res.status(401).end();
+  }
+});
+
+// Enquadramento atual (só pro dono, pra reabrir o editor como estava).
+roomRouter.get('/api/heart-photo/crop', requireAuth, (req, res) => {
+  if (!vaultOwnerGate(res, req.query && req.query.name)) return;
+  try {
+    const data = loadStoreOnly(req);
+    const h = data.heartPhoto;
+    res.json({ crop: (h && h.crop) || null, photo: heartPublic(data) });
+  } catch (e) {
+    res.status(401).json({ error: 'unauthenticated' });
+  }
+});
+
+roomRouter.post('/api/heart-photo', requireAuth, uploadHeart, (req, res) => {
+  const body = req.body || {};
+  if (!vaultOwnerGate(res, body.name)) return;
+  // Só com o cofre aberto nesta sessão: é a prova de que é o dono mesmo
+  // (o nome sozinho qualquer um digita).
+  if (!vaultKeyOr401(req, res)) return;
+  const file = req.file;
+  if (!file || !file.size || file.size > MAX_HEART_BYTES || !/^image\/(jpeg|png|webp)$/.test(file.mimetype)) {
+    return res.status(400).json({ error: 'invalid', message: 'Imagem do coração inválida.' });
+  }
+  let crop = null;
+  try {
+    const c = JSON.parse(body.crop || 'null');
+    if (c && typeof c === 'object') {
+      crop = {
+        itemId: /^[0-9a-f]{8,64}$/.test(String(c.itemId || '')) ? String(c.itemId) : undefined,
+        x: Number(c.x) || 0,
+        y: Number(c.y) || 0,
+        zoom: Math.min(Math.max(Number(c.zoom) || 1, 0.1), 20),
+      };
+    }
+  } catch (e) {
+    crop = null;
+  }
+  try {
+    const data = loadWithSessionKey(req);
+    const old = data.heartPhoto;
+    const mediaId = randomId(16);
+    store.saveMedia(req.session.key, mediaId, file.buffer);
+    data.heartPhoto = {
+      mediaId, mimeType: file.mimetype, by: cleanSender(body.name), ts: Date.now(), crop,
+    };
+    if (old && old.mediaId && !mediaStillReferenced(data, old.mediaId)) store.deleteMediaFile(old.mediaId);
+    store.persist(req.session.key, data);
+    res.json({ ok: true, photo: heartPublic(data) });
+  } catch (e) {
+    console.error(e);
+    res.status(401).json({ error: 'unauthenticated' });
+  }
+});
+
+roomRouter.post('/api/heart-photo/remove', requireAuth, (req, res) => {
+  const body = req.body || {};
+  if (!vaultOwnerGate(res, body.name)) return;
+  if (!vaultKeyOr401(req, res)) return;
+  try {
+    const data = loadWithSessionKey(req);
+    const old = data.heartPhoto;
+    delete data.heartPhoto;
+    if (old && old.mediaId && !mediaStillReferenced(data, old.mediaId)) store.deleteMediaFile(old.mediaId);
+    store.persist(req.session.key, data);
+    res.json({ ok: true });
+  } catch (e) {
+    res.status(401).json({ error: 'unauthenticated' });
+  }
+});
+
 roomRouter.post('/api/vault/send', requireAuth, async (req, res) => {
   const body = req.body || {};
   const sender = cleanSender(body.sender);
@@ -2220,6 +2539,14 @@ roomRouter.post('/api/clear', requireAuth, (req, res) => {
     for (const handle of pendingExpiry.values()) clearTimeout(handle);
     pendingExpiry.clear();
     const preserved = { stickers, prefs: data.prefs || {} };
+    // Visto por último e a versão do changelog já anunciada também não são
+    // conversa (senão o cartão de novidades voltaria depois de limpar).
+    if (data.presence) preserved.presence = data.presence;
+    if (data.changelogVersion) preserved.changelogVersion = data.changelogVersion;
+    if (data.heartPhoto && data.heartPhoto.mediaId) {
+      preserved.heartPhoto = data.heartPhoto;
+      keepIds.add(data.heartPhoto.mediaId);
+    }
     store.clearAll(req.session.key, preserved, keepIds);
     bus.emit('cleared', {});
     res.json({ ok: true });
@@ -2425,6 +2752,19 @@ roomRouter.get('/api/media-list', requireAuth, (req, res) => {
   }
 });
 
+// Batida de presença de uma aba (a cada ~20s com a aba na tela, e na hora
+// em que ela muda de estado - ver beatPresence em app.js). Também chega por
+// navigator.sendBeacon ao fechar/esconder a página, por isso aceita
+// text/plain com JSON dentro.
+const PRESENCE_CID_RE = /^[A-Za-z0-9_-]{6,40}$/;
+roomRouter.post('/api/presence', requireAuth, express.json({ type: ['application/json', 'text/plain'] }), (req, res) => {
+  const { cid, name, state, device } = req.body || {};
+  if (!PRESENCE_CID_RE.test(String(cid || ''))) return res.status(400).json({ error: 'invalid' });
+  ensurePresenceLoaded(req.session.key);
+  presence.beat(String(cid), { name, state, device, key: req.session.key });
+  res.json({ ok: true, presence: presence.current });
+});
+
 roomRouter.get('/api/stream', requireAuth, (req, res) => {
   res.setHeader('Content-Type', 'text/event-stream');
   // no-transform + X-Accel-Buffering: pede pros proxies no caminho (túnel,
@@ -2435,18 +2775,16 @@ roomRouter.get('/api/stream', requireAuth, (req, res) => {
   res.flushHeaders();
   res.write(': connected\n\n');
 
-  // Snapshot of who else is already in the room BEFORE this connection is
-  // registered below - this is what lets the client show "fulano ja esta
-  // online" the instant it connects, without waiting for a live event.
-  const myPresenceName = String((req.query && req.query.name) || '').trim().slice(0, 60);
-  const connId = randomId(8);
-  const alreadyOnline = [...new Set([...onlineConnections.values()].filter(Boolean))];
-  res.write(`event: presence-init\ndata: ${JSON.stringify({ online: alreadyOnline })}\n\n`);
-
-  function broadcastPresence() {
-    const online = [...new Set([...onlineConnections.values()].filter(Boolean))];
-    bus.emit('presence', { online });
-  }
+  // Presença (v54, ver lib/presence.js): a aba se identifica com um cid
+  // próprio (o mesmo que ela usa nas batidas de POST /api/presence), o nome
+  // e o estado em que está agora. O snapshot vai antes do registro desta
+  // aba - é o "quem já estava aqui" que dispara o aviso de entrada.
+  const q = req.query || {};
+  const myPresenceName = String(q.name || '').trim().slice(0, 60);
+  const cid = PRESENCE_CID_RE.test(String(q.cid || '')) ? String(q.cid) : `old-${randomId(6)}`;
+  const streamId = randomId(8);
+  ensurePresenceLoaded(req.session.key);
+  res.write(`event: presence-init\ndata: ${JSON.stringify(presence.current)}\n\n`);
 
   const onMessage = (message) => {
     res.write(`event: message\ndata: ${JSON.stringify(message)}\n\n`);
@@ -2496,7 +2834,7 @@ roomRouter.get('/api/stream', requireAuth, (req, res) => {
 
   // Eventos que são só "repasse cru" pro cliente: favoritar, mudança na
   // coleção de figurinhas/GIFs e "digitando…".
-  const passthrough = ['message-starred', 'stickers-changed', 'typing'].map((name) => {
+  const passthrough = ['message-starred', 'stickers-changed', 'typing', 'message-edited'].map((name) => {
     const fn = (payload) => {
       res.write(`event: ${name}\ndata: ${JSON.stringify(payload)}\n\n`);
     };
@@ -2504,15 +2842,15 @@ roomRouter.get('/api/stream', requireAuth, (req, res) => {
     return [name, fn];
   });
 
-  onlineConnections.set(connId, myPresenceName);
-  broadcastPresence();
+  presence.attach(cid, streamId, {
+    name: myPresenceName, device: q.device, state: q.state, key: req.session.key,
+  });
 
   const keepAlive = setInterval(() => res.write(': ping\n\n'), 25000);
 
   req.on('close', () => {
     clearInterval(keepAlive);
-    onlineConnections.delete(connId);
-    broadcastPresence();
+    presence.detach(cid, streamId);
     bus.off('message', onMessage);
     bus.off('cleared', onCleared);
     bus.off('message-deleted', onDeleted);
@@ -2524,71 +2862,227 @@ roomRouter.get('/api/stream', requireAuth, (req, res) => {
   });
 });
 
-roomRouter.get('/api/export', requireAuth, (req, res) => {
+// ---------------------------------------------------------------------
+// Backup (v54)
+//
+// O backup antigo decifrava TODAS as mídias de uma vez, num laço síncrono,
+// antes de mandar o primeiro byte: com ~5 GB de fotos e vídeos isso travava
+// o servidor inteiro (a conversa parava pros dois), enchia a memória e o
+// Cloudflare desistia esperando (~100s sem resposta = "stream canceled").
+// Agora:
+//  - a resposta começa na hora (conversa.json/.txt vão primeiro);
+//  - um arquivo por vez: lê, decifra, entrega pro zip e só passa pro
+//    próximo quando esse já saiu (a memória fica em ~1 arquivo);
+//  - mídia vai "store" (sem recompressão - foto/vídeo já são comprimidos,
+//    o deflate nível 9 só gastava CPU);
+//  - dá pra baixar só as mensagens (?only=text) ou em partes de até
+//    EXPORT_PART_MB (?part=N) - cada parte é um zip completo com a conversa
+//    em texto + as mídias daquele período. GET /api/export/plan lista as
+//    partes. Sem parâmetro, continua sendo o backup completo.
+// Visualização única nunca entra, em estado nenhum.
+// ---------------------------------------------------------------------
+const EXPORT_PART_BYTES = Math.max(1, Math.round((parseFloat(process.env.EXPORT_PART_MB) || 1024) * 1024 * 1024));
+
+function exportSafeName(raw) {
+  return String(raw || '').replace(/[/\\\u0000-\u001f]/g, '_').slice(0, 150);
+}
+
+function monthFolder(ts) {
+  const d = new Date(ts);
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+}
+
+function buildExportPlan(data) {
+  const items = [];
+  const mediaPath = (id) => path.join(store.mediaDir, `${id}.enc`);
+  const sizeOf = (id) => {
+    try {
+      return Math.max(0, fs.statSync(mediaPath(id)).size - 28); // iv + tag do GCM
+    } catch (e) {
+      return -1;
+    }
+  };
+  for (const m of data.messages) {
+    if (m.ephemeral || m.deleted || !m.mediaId) continue;
+    const size = sizeOf(m.mediaId);
+    if (size < 0) continue;
+    const fallbackName = m.type === 'sticker' ? 'figurinha' : 'arquivo';
+    items.push({
+      id: m.mediaId,
+      ts: m.ts,
+      size,
+      name: `midias/${monthFolder(m.ts)}/${m.ts}-${m.mediaId.slice(0, 8)}-${exportSafeName(m.filename || fallbackName)}`,
+    });
+  }
+  for (const st of data.stickers || []) {
+    if (!st.mediaId) continue;
+    const size = sizeOf(st.mediaId);
+    if (size < 0) continue;
+    const ext = (String(st.mimeType || '').split('/')[1] || 'bin').replace(/[^a-z0-9]/gi, '');
+    items.push({
+      id: st.mediaId,
+      ts: st.ts || 0,
+      size,
+      collection: true,
+      name: `colecao/${st.kind === 'gif' ? 'gif' : 'figurinha'}-${st.id}.${ext}`,
+    });
+  }
+  // Partes em ordem cronológica (a coleção no fim). Um arquivo maior que o
+  // limite vira uma parte sozinho - nunca é cortado.
+  const parts = [];
+  let cur = null;
+  for (const it of items) {
+    if (!cur || (cur.items.length && cur.bytes + it.size > EXPORT_PART_BYTES)) {
+      cur = { part: parts.length + 1, items: [], bytes: 0, from: null, to: null };
+      parts.push(cur);
+    }
+    cur.items.push(it);
+    cur.bytes += it.size;
+    if (!it.collection) {
+      cur.from = cur.from === null ? it.ts : Math.min(cur.from, it.ts);
+      cur.to = cur.to === null ? it.ts : Math.max(cur.to, it.ts);
+    }
+  }
+  const total = items.reduce((a, it) => a + it.size, 0);
+  return { items, parts, total };
+}
+
+function exportTextLines(data) {
+  return data.messages.map((m) => {
+    const when = new Date(m.ts).toLocaleString('pt-BR');
+    if (m.type === 'system') {
+      const items = (m.items || []).map((t) => `    - ${t}`).join('\n');
+      return `[${when}] Atualização do sistema (${m.version}): ${m.title}${items ? `\n${items}` : ''}`;
+    }
+    const reactions = (m.reactions && m.reactions.length)
+      ? ` [reações: ${m.reactions.map((r) => `${r.emoji} ${r.sender}`).join(', ')}]`
+      : '';
+    if (m.deleted && m.expiredEphemeral) return `[${when}] ${m.sender}: (mídia de visualização única, expirada)`;
+    if (m.deleted) return `[${when}] ${m.sender}: (mensagem apagada por ${m.deletedBy || m.sender})`;
+    if (m.type === 'text') {
+      let line = `[${when}] ${m.sender}: ${m.text}${m.editedAt ? ' (editada)' : ''}${reactions}`;
+      for (const v of m.edits || []) {
+        line += `\n    versão anterior (${new Date(v.ts).toLocaleString('pt-BR')}): ${v.text}`;
+      }
+      return line;
+    }
+    if (m.type === 'sticker') return `[${when}] ${m.sender}: (figurinha)${reactions}`;
+    if (m.ephemeral) return `[${when}] ${m.sender}: (${m.type}, visualização única - não incluída no backup)${reactions}`;
+    return `[${when}] ${m.sender}: (${m.type}) ${m.filename || m.mediaId}${reactions}`;
+  });
+}
+
+roomRouter.get('/api/export/plan', requireAuth, (req, res) => {
+  try {
+    const data = loadWithSessionKey(req);
+    const plan = buildExportPlan(data);
+    res.json({
+      messages: data.messages.length,
+      files: plan.items.length,
+      bytes: plan.total,
+      partBytes: EXPORT_PART_BYTES,
+      parts: plan.parts.map((p) => ({
+        part: p.part, files: p.items.length, bytes: p.bytes, from: p.from, to: p.to,
+      })),
+    });
+  } catch (e) {
+    res.status(401).json({ error: 'unauthenticated' });
+  }
+});
+
+roomRouter.get('/api/export', requireAuth, async (req, res) => {
   let data;
   try {
     data = loadWithSessionKey(req);
   } catch (e) {
     return res.status(401).end();
   }
+  const key = req.session.key;
+  const plan = buildExportPlan(data);
+  const onlyText = req.query.only === 'text';
+  const partNo = req.query.part !== undefined ? parseInt(req.query.part, 10) : NaN;
+  let items = plan.items;
+  let label = 'completo';
+  if (onlyText) {
+    items = [];
+    label = 'so-mensagens';
+  } else if (req.query.part !== undefined) {
+    const part = plan.parts[partNo - 1];
+    if (!part) return res.status(404).json({ error: 'no_such_part' });
+    items = part.items;
+    label = `parte-${partNo}-de-${plan.parts.length}`;
+  }
 
+  const d = new Date();
+  const stamp = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   res.setHeader('Content-Type', 'application/zip');
-  res.setHeader('Content-Disposition', `attachment; filename="backup-conversa-${Date.now()}.zip"`);
+  res.setHeader('Content-Disposition', `attachment; filename="backup-conversa-${stamp}-${label}.zip"`);
+  // Pede pros proxies (túnel/Cloudflare) não segurarem o download em buffer.
+  res.setHeader('X-Accel-Buffering', 'no');
+  res.setHeader('Cache-Control', 'no-store, no-transform');
 
-  const archive = archiver('zip', { zlib: { level: 9 } });
+  const archive = archiver('zip', { zlib: { level: 6 } });
+  let aborted = false;
+  let processed = 0;
+  let waiter = null;
+  const wake = () => {
+    if (waiter) {
+      const w = waiter;
+      waiter = null;
+      w();
+    }
+  };
+  archive.on('entry', () => {
+    processed += 1;
+    wake();
+  });
+  archive.on('warning', (err) => console.error('Aviso no backup', err.message));
   archive.on('error', (err) => {
-    console.error(err);
-    res.status(500).end();
+    console.error('Falha no backup', err.message);
+    aborted = true;
+    wake();
+    res.destroy();
+  });
+  // Quem baixava desistiu (fechou a aba, caiu a rede): para de decifrar.
+  res.on('close', () => {
+    if (!res.writableFinished && !aborted) {
+      aborted = true;
+      archive.abort();
+      wake();
+    }
   });
   archive.pipe(res);
 
-  // Ephemeral media is never bundled into the backup, at any point in its
-  // life (locked, mid-countdown, or already expired) - exporting a
-  // "visualização única" file would quietly defeat the entire point of it.
+  // Visualização única nunca entra no backup, em estado nenhum.
   archive.append(JSON.stringify(data.messages.map(sanitizeMessage), null, 2), { name: 'conversa.json' });
+  archive.append(exportTextLines(data).join('\n'), { name: 'conversa.txt' });
+  let queued = 2;
+  data = null; // o resto só precisa do plano
 
-  const lines = data.messages.map((m) => {
-    const when = new Date(m.ts).toLocaleString('pt-BR');
-    const reactions = (m.reactions && m.reactions.length)
-      ? ` [reações: ${m.reactions.map((r) => `${r.emoji} ${r.sender}`).join(', ')}]`
-      : '';
-    if (m.type === 'text') return `[${when}] ${m.sender}: ${m.text}${reactions}`;
-    if (m.type === 'sticker' && !m.deleted) return `[${when}] ${m.sender}: (figurinha)${reactions}`;
-    if (m.expiredEphemeral) return `[${when}] ${m.sender}: (mídia de visualização única, expirada)`;
-    if (m.ephemeral) return `[${when}] ${m.sender}: (${m.type}, visualização única - não incluída no backup)${reactions}`;
-    if (m.deleted) return `[${when}] ${m.sender}: (mensagem apagada por ${m.deletedBy || m.sender})`;
-    return `[${when}] ${m.sender}: (${m.type}) ${m.filename || m.mediaId}${reactions}`;
+  const waitProcessed = (n) => new Promise((resolve) => {
+    const check = () => {
+      if (aborted || processed >= n) resolve();
+      else waiter = check;
+    };
+    check();
   });
-  archive.append(lines.join('\n'), { name: 'conversa.txt' });
 
-  for (const m of data.messages) {
-    if (m.ephemeral) continue;
-    if (m.mediaId && store.mediaExists(m.mediaId)) {
-      try {
-        const buf = store.loadMedia(req.session.key, m.mediaId);
-        const fallbackName = m.type === 'sticker' ? 'figurinha' : 'arquivo';
-        const safeName = `${m.ts}-${m.mediaId}-${(m.filename || fallbackName).replace(/[/\\]/g, '_')}`;
-        archive.append(buf, { name: `midias/${safeName}` });
-      } catch (e) {
-        // skip unreadable/corrupt file rather than failing the whole export
-      }
-    }
-  }
-
-  // A coleção de figurinhas e GIFs também vai no backup (pasta colecao/),
-  // inclusive os itens que nunca foram enviados numa mensagem.
-  for (const s of data.stickers || []) {
-    if (!s.mediaId || !store.mediaExists(s.mediaId)) continue;
+  for (const it of items) {
+    if (aborted) return;
+    let buf;
     try {
-      const buf = store.loadMedia(req.session.key, s.mediaId);
-      const ext = String(s.mimeType || '').split('/')[1] || 'bin';
-      archive.append(buf, { name: `colecao/${s.kind === 'gif' ? 'gif' : 'figurinha'}-${s.id}.${ext.replace(/[^a-z0-9]/gi, '')}` });
+      const blob = await fs.promises.readFile(path.join(store.mediaDir, `${it.id}.enc`));
+      buf = require('./lib/crypto').decryptBuffer(key, blob);
     } catch (e) {
-      // idem: pula o item ilegível
+      continue; // arquivo sumido/ilegível: pula, não derruba o backup
     }
+    if (aborted) return;
+    archive.append(buf, { name: it.name, store: true, date: new Date(it.ts || Date.now()) });
+    queued += 1;
+    buf = null;
+    await waitProcessed(queued);
   }
-
-  archive.finalize();
+  if (!aborted) archive.finalize();
 });
 
 app.use((req, res) => res.status(404).end());
